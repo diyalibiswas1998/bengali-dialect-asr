@@ -1,9 +1,8 @@
 """
 download_parquet_shards.py
 ==========================
-Robust multi-threaded CLI downloader for ARTPARK-IISc/Vaani raw Parquet shards.
-Includes automatic HTTP retries, exponential backoff, and controlled concurrency (3 workers)
-to prevent IncompleteRead socket reset errors on large 500 MB file streams.
+Ultra-fast multi-threaded CLI downloader for ARTPARK-IISc/Vaani raw Parquet shards.
+Optimized with 5 parallel workers, 8MB streaming buffer, and automatic HTTP retries.
 """
 
 import os
@@ -42,11 +41,11 @@ def create_robust_session():
     session = requests.Session()
     retries = Retry(
         total=5,
-        backoff_factor=2,
+        backoff_factor=1,
         status_forcelist=[429, 500, 502, 503, 504],
         raise_on_status=False,
     )
-    adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=10)
+    adapter = HTTPAdapter(max_retries=retries, pool_connections=15, pool_maxsize=15)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
     return session
@@ -70,17 +69,17 @@ def download_single_shard(args):
     for attempt in range(1, max_attempts + 1):
         t0 = time.time()
         try:
-            r = session.get(url, headers=headers, stream=True, timeout=(30, 300))
+            r = session.get(url, headers=headers, stream=True, timeout=(30, 600))
             r.raise_for_status()
 
             downloaded = 0
+            # 8 MB buffer chunks for faster disk write and higher TCP throughput
             with open(temp_path, "wb") as f:
-                for chunk in r.iter_content(chunk_size=1024 * 1024):
+                for chunk in r.iter_content(chunk_size=8 * 1024 * 1024):
                     if chunk:
                         f.write(chunk)
                         downloaded += len(chunk)
 
-            # Check if non-empty file downloaded
             if downloaded > 1_000_000:
                 temp_path.rename(save_path)
                 elapsed = max(0.1, time.time() - t0)
@@ -91,14 +90,13 @@ def download_single_shard(args):
             else:
                 if temp_path.exists():
                     temp_path.unlink(missing_ok=True)
-                print(f"[{shard_idx}/{total_shards}] Warning: {save_path.name} attempt {attempt} returned empty file, retrying...", flush=True)
 
         except Exception as exc:
             if temp_path.exists():
                 temp_path.unlink(missing_ok=True)
             if attempt < max_attempts:
                 print(f"[{shard_idx}/{total_shards}] Retry {attempt}/{max_attempts} for {save_path.name} due to: {exc}", flush=True)
-                time.sleep(3 * attempt)
+                time.sleep(2 * attempt)
             else:
                 print(f"[{shard_idx}/{total_shards}] ERROR: Failed {save_path.name} after {max_attempts} attempts: {exc}", flush=True)
                 return False
@@ -130,10 +128,10 @@ def main():
     all_tasks = [(task[0], task[1], idx + 1, total_count) for idx, task in enumerate(raw_tasks)]
 
     print(f"[download_parquet] Found {total_count} total parquet shards across 11 districts.", flush=True)
-    print(f"[download_parquet] Starting robust parallel downloads (3 workers, auto-retry on drop)...\n", flush=True)
+    print(f"[download_parquet] Starting 5-worker parallel download with 8MB streaming buffer...\n", flush=True)
 
     completed = 0
-    with ThreadPoolExecutor(max_workers=3) as executor:
+    with ThreadPoolExecutor(max_workers=5) as executor:
         futures = [executor.submit(download_single_shard, task) for task in all_tasks]
         for f in as_completed(futures):
             if f.result():
