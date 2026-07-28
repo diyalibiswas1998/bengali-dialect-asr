@@ -1,0 +1,53 @@
+defaults:
+  - _self_
+
+data:
+  train_manifest: data/train.jsonl
+  val_manifest: data/val.jsonl
+  test_manifest: data/test.jsonl
+  # Vaani-specific paths (populated after running scripts/download_vaani.py)
+  vaani_train_manifest: data/vaani/train.jsonl
+  vaani_val_manifest: data/vaani/validation.jsonl
+  vaani_test_manifest: data/vaani/test.jsonl
+model:
+  name: wav2vec2
+  pretrained_model: facebook/wav2vec2-large-xlsr-53
+  use_router: true
+  use_shared_expert: true
+  use_topk_routing: true
+  top_k: 2
+  dropout: 0.1
+  num_tokens: 256  # dynamically overridden by tokenizer vocab size at runtime
+  blank_index: 0
+  num_dialects: 11  # 11 West Bengal districts in Vaani
+loss:
+  use_dialect_loss: true
+  use_load_balancing: true
+  load_balancing_weight: 0.01
+training:
+  stage: 1
+  device: cuda   # NVIDIA GeForce RTX 3050 6GB Laptop GPU
+  use_amp: true  # Automatic Mixed Precision (FP16) on Tensor Cores
+  batch_size: 8
+  max_epochs: 3
+  lr: 2e-4
+  log_dir: logs
+  output_dir: outputs
+  num_workers: 0
+  early_stopping_patience: 3
+vaani:
+  hf_token: ${oc.env:HF_TOKEN,""}  # Set HF_TOKEN env var before running
+  max_duration: 30.0        # seconds; skip samples longer than this
+  max_samples_per_config: null  # null = stream all data across all 11 districts
+  configs:
+    - WestBengal_Alipurduar
+    - WestBengal_CoochBehar
+    - WestBengal_Darjeeling
+    - WestBengal_Jalpaiguri
+    - WestBengal_Jhargram
+    - WestBengal_PaschimMedinipur
+    - WestBengal_Purulia
+    - WestBengal_Malda
+    - WestBengal_DakshinDinajpur
+    - WestBengal_North24Parganas
+    - WestBengal_Kolkata
