@@ -2,9 +2,8 @@
 download_parquet_shards.py
 ==========================
 Ultra-fast multi-threaded CLI downloader script to download all raw .parquet
-dataset shards for the 11 West Bengal district configurations of ARTPARK-IISc/Vaani.
-
-Uses ThreadPoolExecutor(max_workers=8) for 8x parallel downloads.
+dataset shards for the 11 West Bengal district configurations of ARTPARK-IISc/Vaani
+using direct HTTP GET CDN streaming without HuggingFace filelock overhead.
 
 Usage (from research/code/):
 -----------------------------
@@ -16,7 +15,8 @@ import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from huggingface_hub import HfFileSystem, hf_hub_download
+import requests
+from huggingface_hub import HfFileSystem
 from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,23 +40,26 @@ CONFIGS = [
 
 def download_single_shard(args):
     repo_file_path, save_path = args
-    if save_path.exists() and save_path.stat().st_size > 1000:
+    if save_path.exists() and save_path.stat().st_size > 1_000_000:
         return True
 
     save_path.parent.mkdir(parents=True, exist_ok=True)
+    url = f"https://huggingface.co/datasets/ARTPARK-IISc/Vaani/resolve/main/{repo_file_path}"
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
+
+    temp_path = save_path.with_suffix(".tmp")
     try:
-        # Download directly to target directory
-        temp_path = hf_hub_download(
-            repo_id="ARTPARK-IISc/Vaani",
-            filename=repo_file_path,
-            repo_type="dataset",
-            token=HF_TOKEN or None,
-        )
-        # Copy to clean target folder
-        import shutil
-        shutil.copy(temp_path, save_path)
+        r = requests.get(url, headers=headers, stream=True, timeout=60)
+        r.raise_for_status()
+        with open(temp_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    f.write(chunk)
+        temp_path.rename(save_path)
         return True
     except Exception as e:
+        if temp_path.exists():
+            temp_path.unlink(missing_ok=True)
         print(f"Error downloading {repo_file_path}: {e}")
         return False
 
@@ -82,12 +85,12 @@ def main():
             all_tasks.append((repo_file_path, save_path))
 
     print(f"[download_parquet] Found {len(all_tasks)} total parquet shards across 11 districts.")
-    print(f"[download_parquet] Starting 8x parallel thread downloads...\n")
+    print(f"[download_parquet] Starting 8x parallel CDN downloads...\n")
 
     completed = 0
     with ThreadPoolExecutor(max_workers=8) as executor:
         futures = [executor.submit(download_single_shard, task) for task in all_tasks]
-        for f in tqdm(as_completed(futures), total=len(futures), desc="Downloading All Shards", unit="shard"):
+        for f in tqdm(as_completed(futures), total=len(futures), desc="Downloading Parquet Shards", unit="shard"):
             if f.result():
                 completed += 1
 
