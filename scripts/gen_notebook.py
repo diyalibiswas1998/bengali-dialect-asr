@@ -114,6 +114,10 @@ cells.append(code([
 # --- Cell 5: Imports ---
 cells.append(code([
     "# Cell 5: Import modules from cloned codebase\n",
+    "import sys, os\n",
+    'CLONE_DIR = "/kaggle/working/bengali-dialect-asr"\n',
+    'sys.path.insert(0, os.path.join(CLONE_DIR, "src"))\n',
+    "\n",
     "from functools import partial\n",
     "from pathlib import Path\n",
     "\n",
