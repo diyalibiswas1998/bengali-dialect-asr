@@ -10,8 +10,8 @@ import os
 import sys
 from pathlib import Path
 
-# Enable HF Rust multi-part download engine
-os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+# Enable HF High-Performance Xet Transfer Engine
+os.environ["HF_XET_HIGH_PERFORMANCE"] = "1"
 
 import huggingface_hub
 from huggingface_hub import hf_hub_download, HfFileSystem
