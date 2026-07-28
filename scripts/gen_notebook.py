@@ -69,8 +69,10 @@ cells.append(code([
     "else:\n",
     "    !git -C {CLONE_DIR} pull\n",
     "\n",
+    "!pip install -q -e {CLONE_DIR}\n",
+    "\n",
     'sys.path.insert(0, os.path.join(CLONE_DIR, "src"))\n',
-    'print("Repository ready!")\n',
+    'print("Repository cloned and package installed!")\n',
 ]))
 
 # --- Cell 3: Check GPU ---
