@@ -29,14 +29,22 @@ def main():
     config.model.num_tokens = len(tokenizer.vocab)
     accelerator = Accelerator(
         mixed_precision=str(config.training.mixed_precision),
-        dataloader_config=DataLoaderConfiguration(dispatch_batches=True),
+        dataloader_config=DataLoaderConfiguration(dispatch_batches=True, split_batches=True),
         kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=True)],
     )
     if args.require_two_gpus and (accelerator.num_processes != 2 or not torch.cuda.is_available()):
         raise RuntimeError(
             f"Expected two GPU processes, got processes={accelerator.num_processes}, cuda={torch.cuda.is_available()}"
         )
-    loader = make_loader(config, token, tokenizer, "train", 0, max_samples=8)
+    loader = make_loader(
+        config,
+        token,
+        tokenizer,
+        "train",
+        0,
+        max_samples=8,
+        batch_size=int(config.training.per_device_batch_size) * accelerator.num_processes,
+    )
     model = BengaliDialectASR(config)
     model.set_phase(1, int(config.training.unfrozen_top_layers))
     model, loader = accelerator.prepare(model, loader)

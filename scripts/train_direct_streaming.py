@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 
 import torch
@@ -87,7 +88,10 @@ def save_checkpoint(accelerator, model, output_dir, name, state, config, tokeniz
     checkpoint = output_dir / name
     accelerator.wait_for_everyone()
     accelerator.save_state(str(checkpoint))
-    accelerator.save(accelerator.get_state_dict(model), checkpoint / "model_state.pt")
+    # Accelerate already stores resumable model weights in every checkpoint.
+    # Keep a separate portable state dict only for the final evaluation checkpoint.
+    if name == "checkpoint-phase-3":
+        accelerator.save(accelerator.get_state_dict(model), checkpoint / "model_state.pt")
     if accelerator.is_main_process:
         (checkpoint / "trainer_state.json").write_text(json.dumps(state, indent=2), encoding="utf-8")
         clean_config = sanitize(OmegaConf.to_container(config, resolve=True))
@@ -104,7 +108,37 @@ def save_checkpoint(accelerator, model, output_dir, name, state, config, tokeniz
     accelerator.wait_for_everyone()
 
 
-def make_loader(config, token, tokenizer, split, epoch, max_samples=None):
+def prune_step_checkpoints(accelerator, output_dir: Path, keep: int):
+    """Bound Kaggle disk use while retaining all phase-boundary checkpoints."""
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        candidates = sorted(
+            (path for path in output_dir.glob("checkpoint-step-*") if path.is_dir()),
+            key=lambda path: int(path.name.rsplit("-", 1)[-1]),
+        )
+        for path in candidates[:-max(1, keep)]:
+            if path.parent.resolve() != output_dir.resolve() or not path.name.startswith("checkpoint-step-"):
+                raise RuntimeError(f"Unsafe checkpoint cleanup target: {path}")
+            shutil.rmtree(path)
+    accelerator.wait_for_everyone()
+
+
+def direct_training_collate(batch):
+    """Keep only tensors so Accelerate can broadcast/split variable audio safely."""
+    collated = processed_collate(batch)
+    keys = (
+        "input_values",
+        "attention_mask",
+        "input_lengths",
+        "targets",
+        "target_lengths",
+        "dialect_labels",
+        "dialect_label_mask",
+    )
+    return {key: collated[key] for key in keys}
+
+
+def make_loader(config, token, tokenizer, split, epoch, max_samples=None, batch_size=None):
     dataset = VaaniStreamingDataset(
         StreamingOptions(
             split=split,
@@ -121,10 +155,11 @@ def make_loader(config, token, tokenizer, split, epoch, max_samples=None):
     )
     return DataLoader(
         dataset,
-        batch_size=int(config.training.per_device_batch_size),
-        collate_fn=processed_collate,
+        batch_size=batch_size or int(config.training.per_device_batch_size),
+        collate_fn=direct_training_collate,
         num_workers=int(config.training.num_workers),
         pin_memory=True,
+        drop_last=(batch_size or int(config.training.per_device_batch_size)) > 1,
     )
 
 
@@ -180,7 +215,7 @@ def main():
     accelerator = Accelerator(
         gradient_accumulation_steps=int(config.training.gradient_accumulation_steps),
         mixed_precision=str(config.training.mixed_precision),
-        dataloader_config=DataLoaderConfiguration(dispatch_batches=True),
+        dataloader_config=DataLoaderConfiguration(dispatch_batches=True, split_batches=True),
         kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=True)],
     )
     if args.require_two_gpus and (accelerator.num_processes != 2 or not torch.cuda.is_available()):
@@ -238,7 +273,15 @@ def main():
             optimizer.param_groups[0]["lr"] *= float(config.training.final_encoder_lr) / float(config.training.encoder_lr)
 
         train_loader = accelerator.prepare_data_loader(
-            make_loader(config, token, tokenizer, "train", phase - 1, args.max_train_samples)
+            make_loader(
+                config,
+                token,
+                tokenizer,
+                "train",
+                phase - 1,
+                args.max_train_samples,
+                batch_size=int(config.training.per_device_batch_size) * accelerator.num_processes,
+            )
         )
         start_batch = int(state["batch_in_phase"]) if phase == int(state["phase"]) else 0
         phase_loader = accelerator.skip_first_batches(train_loader, start_batch) if start_batch else train_loader
@@ -286,9 +329,22 @@ def main():
                         accelerator, model, output_dir,
                         f"checkpoint-step-{state['global_step']:08d}", state, config, tokenizer,
                     )
+                    prune_step_checkpoints(
+                        accelerator,
+                        output_dir,
+                        int(config.training.keep_last_step_checkpoints),
+                    )
 
         validation_loader = accelerator.prepare_data_loader(
-            make_loader(config, token, tokenizer, "validation", 0, validation_samples)
+            make_loader(
+                config,
+                token,
+                tokenizer,
+                "validation",
+                0,
+                validation_samples,
+                batch_size=int(config.training.per_device_batch_size) * accelerator.num_processes,
+            )
         )
         value = validation_loss(model, validation_loader, config, accelerator)
         accelerator.print(f"phase={phase} validation_loss={value:.4f}")

@@ -26,7 +26,7 @@ This notebook streams the original 11 West Bengal Vaani configurations during ev
 
 Trade-offs: the stable speaker-hash split is globally disjoint but not globally stratified; a mid-pass resume replays and skips the earlier stream; Hugging Face availability directly affects training; and three full passes can exceed several Kaggle sessions.
 """),
-        code("""import os, shutil, subprocess, sys
+        code("""import os, shutil, subprocess, sys, time
 from pathlib import Path
 
 REPO_URL = "https://github.com/diyalibiswas1998/bengali-dialect-asr.git"
@@ -49,39 +49,132 @@ PRIOR_RUN_DIR = None  # Example: Path("/kaggle/input/direct-vaani-checkpoints/di
 RUN_DIR = Path("/kaggle/working/direct-moe-run")
 EXPERIMENT = "moe"  # baseline, moe, top1, no_dialect, no_shared
 RUN_SMOKE = True
+MAX_SMOKE_ATTEMPTS = 3
+MAX_TRAIN_ATTEMPTS = 3
 
 if PRIOR_RUN_DIR and not RUN_DIR.exists():
     shutil.copytree(PRIOR_RUN_DIR, RUN_DIR)
 RUN_DIR.mkdir(parents=True, exist_ok=True)
+LOG_DIR = RUN_DIR / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+def run_logged(command, filename):
+    log_path = LOG_DIR / filename
+    print(f"Running command; persistent log: {log_path}")
+    environment = dict(os.environ)
+    environment["PYTHONUNBUFFERED"] = "1"
+    with log_path.open("a", encoding="utf-8", buffering=1) as log_handle:
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+                env=environment,
+            )
+            for line in process.stdout:
+                print(line, end="")
+                log_handle.write(line)
+            return process.wait()
+        except Exception as exc:
+            message = f"Unable to launch command: {type(exc).__name__}: {exc}\\n"
+            print(message, end="")
+            log_handle.write(message)
+            return 127
+
 print(f"experiment={EXPERIMENT} output={RUN_DIR}")
 """),
         code("""# Verify original-stream access plus one forward/backward on both T4 GPUs.
+SMOKE_EXIT_CODE = 0
+SMOKE_ATTEMPTS = 0
 if RUN_SMOKE:
-    subprocess.check_call([
-        "accelerate", "launch", "--config_file", str(REPO_DIR / "configs/accelerate_t4x2.yaml"),
-        str(REPO_DIR / "scripts/smoke_direct_streaming.py"),
-        "--config", str(REPO_DIR / "configs/direct_streaming.yaml"),
-        "--require-two-gpus",
-    ])
+    for SMOKE_ATTEMPTS in range(1, MAX_SMOKE_ATTEMPTS + 1):
+        print(f"Smoke attempt {SMOKE_ATTEMPTS}/{MAX_SMOKE_ATTEMPTS}")
+        SMOKE_EXIT_CODE = run_logged([
+            "accelerate", "launch", "--config_file", str(REPO_DIR / "configs/accelerate_t4x2.yaml"),
+            str(REPO_DIR / "scripts/smoke_direct_streaming.py"),
+            "--config", str(REPO_DIR / "configs/direct_streaming.yaml"),
+            "--require-two-gpus",
+        ], "smoke.log")
+        if SMOKE_EXIT_CODE == 0:
+            break
+        if SMOKE_ATTEMPTS < MAX_SMOKE_ATTEMPTS:
+            print("Smoke failed; retrying in 15 seconds (handles transient Hugging Face 503 errors).")
+            time.sleep(15)
+print(f"smoke_exit_code={SMOKE_EXIT_CODE}")
 """),
         code("""# Three direct dataset passes: frozen encoder, top-4 unfrozen, reduced encoder LR.
-command = [
-    "accelerate", "launch", "--config_file", str(REPO_DIR / "configs/accelerate_t4x2.yaml"),
-    str(REPO_DIR / "scripts/train_direct_streaming.py"),
-    "--config", str(REPO_DIR / "configs/direct_streaming.yaml"),
-    "--output-dir", str(RUN_DIR),
-    "--experiment", EXPERIMENT,
-    "--require-two-gpus",
-]
-if list(RUN_DIR.glob("checkpoint-*")):
-    command += ["--resume", "latest"]
-subprocess.check_call(command)
+TRAIN_EXIT_CODE = None
+TRAIN_ATTEMPTS = 0
+if SMOKE_EXIT_CODE == 0:
+    for TRAIN_ATTEMPTS in range(1, MAX_TRAIN_ATTEMPTS + 1):
+        command = [
+            "accelerate", "launch", "--config_file", str(REPO_DIR / "configs/accelerate_t4x2.yaml"),
+            str(REPO_DIR / "scripts/train_direct_streaming.py"),
+            "--config", str(REPO_DIR / "configs/direct_streaming.yaml"),
+            "--output-dir", str(RUN_DIR),
+            "--experiment", EXPERIMENT,
+            "--require-two-gpus",
+        ]
+        if list(RUN_DIR.glob("checkpoint-*")):
+            command += ["--resume", "latest"]
+        print(f"Training attempt {TRAIN_ATTEMPTS}/{MAX_TRAIN_ATTEMPTS}")
+        TRAIN_EXIT_CODE = run_logged(command, "training.log")
+        if TRAIN_EXIT_CODE == 0:
+            break
+        if TRAIN_ATTEMPTS < MAX_TRAIN_ATTEMPTS:
+            print("Training stopped; retrying from the latest checkpoint in 30 seconds.")
+            time.sleep(30)
+else:
+    print("Training skipped because the two-GPU smoke test failed.")
+print(f"training_exit_code={TRAIN_EXIT_CODE}")
 """),
-        code("""final_checkpoint = RUN_DIR / "checkpoint-phase-3"
+        code("""# Save a compact manifest and all logs under RUN_DIR for Kaggle output persistence.
+import datetime, json
+
+final_checkpoint = RUN_DIR / "checkpoint-phase-3"
+checkpoints = sorted(path for path in RUN_DIR.glob("checkpoint-*") if path.is_dir())
+checkpoint_summary = []
+for checkpoint in checkpoints:
+    checkpoint_summary.append({
+        "name": checkpoint.name,
+        "bytes": sum(path.stat().st_size for path in checkpoint.rglob("*") if path.is_file()),
+    })
+repo_commit = subprocess.check_output(
+    ["git", "-C", str(REPO_DIR), "rev-parse", "HEAD"], text=True
+).strip()
+manifest = {
+    "created_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    "repository_commit": repo_commit,
+    "experiment": EXPERIMENT,
+    "source_dataset": "ARTPARK-IISc/Vaani",
+    "source_revision": "d8e3ca3eb483a19c63e196f5379790e5fd8daaad",
+    "smoke_exit_code": SMOKE_EXIT_CODE,
+    "smoke_attempts": SMOKE_ATTEMPTS,
+    "training_exit_code": TRAIN_EXIT_CODE,
+    "training_attempts": TRAIN_ATTEMPTS,
+    "complete": final_checkpoint.exists(),
+    "checkpoints": checkpoint_summary,
+    "logs": [path.name for path in sorted(LOG_DIR.glob("*.log"))],
+}
+(RUN_DIR / "artifact_manifest.json").write_text(
+    json.dumps(manifest, indent=2), encoding="utf-8"
+)
+shutil.copy2(REPO_DIR / "configs/direct_streaming.yaml", RUN_DIR / "effective_direct_streaming.yaml")
+print(json.dumps(manifest, indent=2))
+print(f"Kaggle will persist checkpoints and logs from: {RUN_DIR}")
+
+if SMOKE_EXIT_CODE != 0:
+    raise RuntimeError(f"Smoke test failed; inspect {LOG_DIR / 'smoke.log'}")
+if TRAIN_EXIT_CODE not in (0, None):
+    raise RuntimeError(f"Training failed; inspect {LOG_DIR / 'training.log'}")
 if final_checkpoint.exists():
     print(f"Training complete: {final_checkpoint}")
 else:
-    print("Session ended before phase 3. Save RUN_DIR as a private Kaggle Dataset and resume it next session.")
+    print("Run incomplete. Save RUN_DIR as a private checkpoint Dataset and resume next session.")
 """),
         markdown("""## Session handoff
 
@@ -89,6 +182,9 @@ The notebook checkpoints every 250 optimizer steps and at each phase boundary. A
 """),
     ],
 }
+
+for index, cell in enumerate(notebook["cells"]):
+    cell["id"] = f"direct-{index:02d}"
 
 root = Path(__file__).resolve().parents[1]
 for destination in (root / "kaggle_direct_vaani_training.ipynb", root.parent / "kaggle_direct_vaani_training.ipynb"):

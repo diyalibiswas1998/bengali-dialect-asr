@@ -39,4 +39,5 @@ training:
   unfrozen_top_layers: 4
   estimated_optimizer_steps_per_phase: 2500
   checkpoint_every_steps: 250
+  keep_last_step_checkpoints: 2
   log_every_steps: 25

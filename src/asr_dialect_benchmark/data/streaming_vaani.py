@@ -19,6 +19,16 @@ from .build_vaani import (
     wav2vec2_output_frames,
 )
 
+STREAM_COLUMNS = {
+    "audio",
+    "transcript", "transcription", "text", "sentence",
+    "language", "lang", "languageName", "language_name",
+    "speakerID", "speakerId", "speaker_id", "speaker",
+    "district", "source_district", "districtName",
+    "residence_district", "residenceDistrict", "stay", "residence",
+    "sample_id", "id", "utterance_id", "audio_id",
+}
+
 
 def fixed_bengali_tokenizer() -> SimpleTokenizer:
     """Return a deterministic vocabulary without a preparatory corpus pass."""
@@ -80,7 +90,13 @@ class VaaniStreamingDataset(IterableDataset):
                 streaming=True,
                 token=self.options.token,
                 revision=self.options.revision,
-            ).cast_column("audio", Audio(decode=False))
+            )
+            if dataset.column_names:
+                selected_columns = [name for name in dataset.column_names if name in STREAM_COLUMNS]
+                if "audio" not in selected_columns:
+                    raise RuntimeError(f"Vaani configuration {config} has no audio column")
+                dataset = dataset.select_columns(selected_columns)
+            dataset = dataset.cast_column("audio", Audio(decode=False))
             dataset = dataset.shuffle(
                 seed=self.options.seed + self.options.epoch * 1009 + config_index,
                 buffer_size=self.options.shuffle_buffer,
