@@ -22,7 +22,7 @@ notebook = {
     "cells": [
         markdown("""# Build the private processed Bengali Vaani dataset
 
-Run this once with Internet enabled. Add `HF_TOKEN` as a Kaggle secret after accepting the upstream dataset terms. The token is read from the secret store and is never written to an artifact. The builder first inspects the transcribed Bengali subset and fails safely if required metadata is absent. Set `ALLOW_MAIN_FALLBACK=True` only after explicitly accepting the much larger 11-district raw-corpus build.
+Run this once with Internet enabled. Add `HF_TOKEN` as a Kaggle secret after accepting the terms for both Vaani repositories. The token is read from the secret store and is never written to an artifact. The Bengali transcription configuration has audio and text but not the speaker/residence fields required for speaker-disjoint dialect evaluation, so this maintained notebook explicitly falls back to the 11 West Bengal district configurations in the main Vaani corpus.
 """),
         code("""import os, subprocess, sys
 from pathlib import Path
@@ -45,7 +45,7 @@ print("Repository and dependencies are ready; the token value was not displayed.
 from pathlib import Path
 
 OUTPUT_DIR = Path("/kaggle/working/vaani-bengali-processed")
-ALLOW_MAIN_FALLBACK = False
+ALLOW_MAIN_FALLBACK = True  # Required: transcription config lacks speaker/residence metadata.
 RESUME_STAGING = None  # Set to a preserved /kaggle/working/.vaani-bengali-processed-building-* directory.
 if OUTPUT_DIR.exists():
     raise FileExistsError(f"{OUTPUT_DIR} already exists. Remove it only if you intend to restart the build.")
