@@ -1,47 +1,85 @@
+"""MMS-300M CTC baseline and dialect-aware MoE model."""
+
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
-from transformers import Wav2Vec2Config, Wav2Vec2Model
+from transformers import AutoModel
 
-from .moe import SparseMixtureOfExperts
+from .moe import SparseMixtureOfExperts, masked_mean
+
+
+def _value(config, name, default=None):
+    if isinstance(config, dict):
+        return config.get(name, default)
+    return getattr(config, name, default)
 
 
 class BengaliDialectASR(nn.Module):
-    def __init__(self, cfg):
+    def __init__(self, config):
         super().__init__()
-        self.cfg = cfg
-        # Read num_dialects from config so it works for both 4-dialect and 11-district setups
-        num_dialects = getattr(cfg.model, "num_dialects", 4)
-        num_tokens = getattr(cfg.model, "num_tokens", 32)
+        model_config = _value(config, "model", config)
+        self.pretrained_model = _value(model_config, "pretrained_model", "facebook/mms-300m")
+        self.num_dialects = int(_value(model_config, "num_dialects", 4))
+        self.use_moe = bool(_value(model_config, "use_moe", True))
+        self.encoder = AutoModel.from_pretrained(self.pretrained_model)
+        if bool(_value(model_config, "gradient_checkpointing", True)):
+            self.encoder.gradient_checkpointing_enable()
+        hidden_size = int(self.encoder.config.hidden_size)
+        if self.use_moe:
+            self.moe = SparseMixtureOfExperts(
+                hidden_size=hidden_size,
+                num_dialects=self.num_dialects,
+                top_k=int(_value(model_config, "top_k", 2)),
+                dropout=float(_value(model_config, "dropout", 0.1)),
+                use_router=bool(_value(model_config, "use_router", True)),
+                use_shared_expert=bool(_value(model_config, "use_shared_expert", True)),
+            )
+        else:
+            self.moe = None
+        self.dialect_classifier = nn.Linear(hidden_size, self.num_dialects)
+        self.ctc_head = nn.Linear(hidden_size, int(_value(model_config, "num_tokens", 64)))
 
-        self.encoder = Wav2Vec2Model(Wav2Vec2Config(
-            vocab_size=num_tokens,
-            hidden_size=768,          # smaller hidden size for faster training
-            num_hidden_layers=6,      # reduced layers for research experiments
-            num_attention_heads=12,
-            feat_proj_dropout=0.0,
-            hidden_dropout=0.1,
-            layerdrop=0.0,
-            pad_token_id=0,
-            bos_token_id=1,
-            eos_token_id=2,
-        ))
-        self.encoder.feature_extractor._freeze_parameters()
-        self.moe = SparseMixtureOfExperts(
-            hidden_size=self.encoder.config.hidden_size,
-            num_dialects=num_dialects,
-            top_k=getattr(cfg.model, "top_k", 2),
-            dropout=cfg.model.dropout,
-            use_router=cfg.model.use_router,
-            use_shared_expert=cfg.model.use_shared_expert,
-        )
-        self.classifier = nn.Linear(self.encoder.config.hidden_size, num_dialects)
-        self.ctc_head = nn.Linear(self.encoder.config.hidden_size, num_tokens)
-        self.loss_fn = nn.CTCLoss(blank=getattr(cfg.model, "blank_index", 0), zero_infinity=True)
+    def feature_lengths(self, input_lengths: torch.Tensor) -> torch.Tensor:
+        return self.encoder._get_feat_extract_output_lengths(input_lengths).to(torch.long)
 
-    def forward(self, input_values, attention_mask=None, labels=None, dialect_labels=None):
-        outputs = self.encoder(input_values=input_values, attention_mask=attention_mask)
-        hidden_states = outputs.last_hidden_state
-        moep = self.moe(hidden_states)
-        logits = self.ctc_head(moep)
-        dialect_logits = self.classifier(moep.mean(dim=1))
-        return {"logits": logits, "dialect_logits": dialect_logits, "hidden_states": moep}
+    def set_phase(self, phase: int, top_layers: int = 4) -> None:
+        for parameter in self.encoder.parameters():
+            parameter.requires_grad = False
+        if phase >= 2:
+            layers = self.encoder.encoder.layers
+            for layer in layers[-top_layers:]:
+                for parameter in layer.parameters():
+                    parameter.requires_grad = True
+            # The final normalization is part of the top representation.
+            if hasattr(self.encoder.encoder, "layer_norm"):
+                for parameter in self.encoder.encoder.layer_norm.parameters():
+                    parameter.requires_grad = True
+
+    def forward(self, input_values=None, attention_mask=None, input_lengths=None, routing_inputs=None):
+        if routing_inputs is not None:
+            if self.moe is None:
+                return {"gate_probs": None, "topk_indices": None}
+            gate_probs, _, topk_indices = self.moe.route(routing_inputs)
+            return {"gate_probs": gate_probs, "topk_indices": topk_indices}
+        encoded = self.encoder(input_values=input_values, attention_mask=attention_mask)
+        hidden_states = encoded.last_hidden_state
+        if input_lengths is None:
+            input_lengths = attention_mask.sum(-1) if attention_mask is not None else input_values.new_full((input_values.shape[0],), input_values.shape[1], dtype=torch.long)
+        output_lengths = self.feature_lengths(input_lengths)
+        output_lengths = output_lengths.clamp(max=hidden_states.shape[1])
+        time = torch.arange(hidden_states.shape[1], device=hidden_states.device)[None, :]
+        feature_mask = time < output_lengths[:, None]
+        if self.moe is not None:
+            hidden_states, gate_probs, topk_indices, router_input = self.moe(hidden_states, feature_mask)
+        else:
+            gate_probs, topk_indices, router_input = None, None, None
+        pooled = masked_mean(hidden_states, feature_mask)
+        return {
+            "logits": self.ctc_head(hidden_states),
+            "dialect_logits": self.dialect_classifier(pooled),
+            "gate_probs": gate_probs,
+            "topk_indices": topk_indices,
+            "router_input": router_input,
+            "output_lengths": output_lengths,
+        }

@@ -1,6 +1,6 @@
-# Compatibility copy. New commands should pass configs/research.yaml explicitly.
 seed: 42
 experiment: moe
+
 model:
   pretrained_model: facebook/mms-300m
   num_dialects: 4
@@ -11,10 +11,12 @@ model:
   top_k: 2
   dropout: 0.1
   gradient_checkpointing: true
+
 loss:
   ctc_weight: 1.0
   dialect_weight: 0.2
   balance_weight: 0.01
+
 training:
   per_device_batch_size: 1
   gradient_accumulation_steps: 16

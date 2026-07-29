@@ -21,7 +21,7 @@ env/
 # Data & outputs (too large for git)
 outputs/
 logs/
-data/
+/data/
 *.pt
 *.ckpt
 *.bin

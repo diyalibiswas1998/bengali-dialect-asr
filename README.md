@@ -1,65 +1,94 @@
-# Bengali Dialect ASR with Sparse Mixture-of-Experts
+# Bengali Dialect ASR: MMS-300M + Sparse MoE
 
-This repository implements a research-grade Bengali dialect-aware speech-to-text framework that combines a pretrained speech foundation encoder with a sparse mixture-of-experts (MoE) module and a dialect router. The design supports four Bengali dialects and uses a three-stage training recipe:
+This repository implements a reproducible comparison between an MMS-300M Bengali CTC baseline and a four-expert dialect-aware MoE. It trains from a local, validated Vaani derivative rather than downloading the raw corpus during every epoch.
 
-1. Router-only training with frozen encoder.
-2. Joint training of experts, shared expert, and CTC decoder with dialect and load-balancing losses.
-3. End-to-end fine-tuning with unfreezed top encoder layers.
+The dialect labels are **provisional geographic proxies**, not linguistic ground truth. The versioned mapping is in `src/asr_dialect_benchmark/common/constants.py`; Darjeeling and North 24 Parganas are treated as boundary cases in evaluation.
 
-## Highlights
+## 1. Build the processed corpus once
 
-- Pretrained encoder backbone via Hugging Face Transformers (XLS-R 300M or WavLM Large)
-- Dialect routing network with top-2 expert selection
-- Shared expert + dialect experts with residual feed-forward blocks
-- CTC-based transcription head
-- Hydra configuration, mixed precision, gradient accumulation, early stopping, TensorBoard logging, and checkpointing
-- Evaluation metrics: WER, CER, MER, WIL, WIP, per-dialect WER, confusion matrix, router accuracy, expert utilization, and load balancing statistics
+Accept the applicable Hugging Face dataset terms and set `HF_TOKEN` without placing it in a notebook or config. Then run:
 
-## Project layout
+```bash
+pip install -r requirements.txt
+pip install -e .
+python scripts/build_processed_vaani.py \
+  --source auto \
+  --output-dir /path/to/vaani-bengali-processed
+python scripts/validate_processed.py \
+  --data-dir /path/to/vaani-bengali-processed \
+  --decode-audio
+```
 
-- configs/: Hydra configuration files
-- data/: example manifest and data assets
-- scripts/: training, validation, and inference entry points
-- src/asr_dialect_benchmark/: modular implementation package
+`auto` first probes the `Bengali` configuration of `ARTPARK-IISc/Vaani-transcription-part`. It uses that source only when audio, transcript, speaker, duration, district, and residence metadata are present. Authentication/network failures stop immediately. If the fields are missing, rerun with `--allow-main-fallback` to explicitly acknowledge filtering the much larger 11-district raw corpus.
 
-## Quick start
+Records are NFC-normalized Bengali transcripts with mono 16 kHz FLAC bytes. Rows must have a speaker ID, decode successfully, be 0.5–30 seconds, be CTC-alignable, and be unique by stable ID and audio hash. Only parsed residence districts receive a dialect label; other valid rows remain CTC examples with label `-100`. Speakers are assigned globally to deterministic 80/10/10 splits. Failed builds preserve validated staging; resume them with `--resume-staging /path/to/.building-directory`.
 
-1. Install dependencies:
+The output contains `train/`, `validation/`, and `test/` Parquet shards, JSONL split manifests, `metadata.json`, `vocab.json`, `dialect_mapping.json`, and source/license notes. Upload this directory as a **private Kaggle Dataset**, retaining upstream attribution and terms.
 
-   ```bash
-   pip install -r requirements.txt
-   ```
+For a quick pipeline check, add `--max-samples 200`; do not use that cap for reported experiments.
 
-2. Prepare a manifest file in JSONL format with fields:
+## 2. Train on Kaggle T4×2
 
-   ```json
-   {"audio_path": "path/to/audio.wav", "transcript": "আপনার টেক্সট", "dialect_label": "barishal"}
-   ```
+Attach the processed private dataset locally, then launch two processes:
 
-3. Train:
+```bash
+accelerate launch --config_file configs/accelerate_t4x2.yaml \
+  scripts/train_research.py \
+  --data-dir /kaggle/input/vaani-bengali-processed \
+  --output-dir /kaggle/working/moe-run \
+  --experiment moe \
+  --resume latest
+```
 
-   ```bash
-   python scripts/train.py data.manifest_path=/path/to/train.jsonl
-   ```
+Omit `--resume` for the first session. Preserve `/kaggle/working/moe-run` as a private Kaggle Dataset version between sessions, restore it before the next run, and then use `--resume latest`.
 
-4. Validate:
+The three passes are fixed by `configs/research.yaml`:
 
-   ```bash
-   python scripts/validate.py ckpt_path=/path/to/checkpoint.pt
-   ```
+1. freeze MMS-300M; train heads, router, four dialect experts, and the shared expert;
+2. unfreeze the top four MMS transformer blocks at `1e-5`;
+3. continue with those blocks at `5e-6`.
 
-5. Infer:
+The head/MoE LR is `2e-4`; CTC/dialect/load-balancing weights are `1.0/0.2/0.01`. Dialect supervision aligns both the classifier and router, sparse dispatch evaluates only selected dialect experts, and balancing statistics are recomputed over the gathered effective batch. T4×2 uses FP16, per-device batch 1, accumulation 16 (effective batch 32), storage-local duration buckets, 5% warmup, linear decay, and gradient clipping 1.0. Checkpoints are written every 2,000 optimizer updates and at every phase boundary. They contain model, optimizer, scheduler, scaler, RNG, next batch position, sanitized config, vocabulary, mapping, and content-complete split fingerprints.
 
-   ```bash
-   python scripts/infer.py ckpt_path=/path/to/checkpoint.pt manifest_path=/path/to/test.jsonl output_path=/tmp/preds.jsonl
-   ```
+Run the identical-split experiments with only `--experiment` changed:
 
-## Configuration knobs
+```text
+baseline   MMS-300M CTC without MoE
+moe        top-2 MoE + dialect + shared expert
+top1       top-1 routing ablation
+no_dialect no dialect-loss ablation
+no_shared  no shared-expert ablation
+```
 
-Ablation switches are available in the configuration files to disable:
+## 3. Validate and evaluate
 
-- Router
-- Shared Expert
-- Load Balancing
-- Top-k Routing
-- Dialect Loss
+Before full runs, verify DDP forward/backward and state restoration on T4×2:
+
+```bash
+accelerate launch --config_file configs/accelerate_t4x2.yaml \
+  scripts/smoke_test_research.py \
+  --data-dir /kaggle/input/vaani-bengali-processed \
+  --require-two-gpus
+```
+
+Evaluate a completed checkpoint:
+
+```bash
+python scripts/validate_checkpoint.py \
+  --checkpoint /path/to/checkpoint-phase-3 \
+  --expected-processes 2
+accelerate launch --config_file configs/accelerate_t4x2.yaml \
+  scripts/evaluate_research.py \
+  --checkpoint /path/to/checkpoint-phase-3 \
+  --data-dir /kaggle/input/vaani-bengali-processed
+```
+
+The JSON report includes overall WER/CER, macro and per-dialect scores, source- and residence-district scores, dialect-head and router macro-F1/confusion matrices, expert utilization, speaker-bootstrap 95% confidence intervals, and residence-based sensitivity excluding Darjeeling and North 24 Parganas. Router classification is intentionally omitted for the no-dialect-loss ablation because expert IDs are then permutation-invariant.
+
+## Research constraints
+
+- All reported systems must have identical split fingerprints in checkpoint `config.json`.
+- “All data” means all valid transcribed Bengali rows, not untranscribed rows.
+- Obtain Bengali linguistic review before presenting the mapping as definitive.
+- Review the current Vaani and MMS-300M licenses. MMS-300M is intended here for noncommercial research.
+- A baseline win or a null result is valid; reproducibility and defensible labels are the success criteria.
