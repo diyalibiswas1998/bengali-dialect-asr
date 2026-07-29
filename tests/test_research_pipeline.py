@@ -1,9 +1,14 @@
 from collections import Counter, defaultdict
 import hashlib
 import json
+from pathlib import Path
+import shutil
+import subprocess
+import time
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 import torch.nn as nn
 
@@ -241,3 +246,35 @@ def test_direct_stream_preserves_16khz_waveform_and_speaker_split(monkeypatch):
     assignments = [speaker_split(f"speaker-{index}", 42) for index in range(2_000)]
     assert 0.75 < assignments.count("train") / len(assignments) < 0.85
     assert set(assignments) == {"train", "validation", "test"}
+
+
+def test_direct_notebook_saves_manifest_when_setup_fails(tmp_path):
+    notebook_path = Path(__file__).resolve().parents[1] / "kaggle_direct_vaani_training.ipynb"
+    notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
+    run_dir = tmp_path / "direct-moe-run"
+    log_dir = run_dir / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "setup.log").write_text("synthetic secret failure\n", encoding="utf-8")
+    namespace = {
+        "Path": Path,
+        "shutil": shutil,
+        "subprocess": subprocess,
+        "time": time,
+        "RUN_DIR": run_dir,
+        "LOG_DIR": log_dir,
+        "REPO_DIR": tmp_path / "missing-repository",
+        "SETUP_EXIT_CODE": 1,
+        "run_logged": lambda *_args, **_kwargs: 1,
+    }
+
+    for cell_index in (2, 3, 4):
+        source = "".join(notebook["cells"][cell_index]["source"])
+        exec(compile(source, f"notebook-cell-{cell_index}", "exec"), namespace)
+    final_source = "".join(notebook["cells"][5]["source"])
+    with pytest.raises(RuntimeError, match="Setup failed"):
+        exec(compile(final_source, "notebook-cell-5", "exec"), namespace)
+
+    manifest = json.loads((run_dir / "artifact_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["setup_exit_code"] == 1
+    assert manifest["training_exit_code"] is None
+    assert manifest["logs"] == ["setup.log"]

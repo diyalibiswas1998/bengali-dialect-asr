@@ -31,32 +31,11 @@ from pathlib import Path
 
 REPO_URL = "https://github.com/diyalibiswas1998/bengali-dialect-asr.git"
 REPO_DIR = Path("/kaggle/working/bengali-dialect-asr")
-if not REPO_DIR.exists():
-    subprocess.check_call(["git", "clone", REPO_URL, str(REPO_DIR)])
-else:
-    subprocess.check_call(["git", "-C", str(REPO_DIR), "pull", "--ff-only"])
-subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "-r", str(REPO_DIR / "requirements.txt")])
-subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "-e", str(REPO_DIR)])
-
-from kaggle_secrets import UserSecretsClient
-os.environ["HF_TOKEN"] = UserSecretsClient().get_secret("HF_TOKEN")
-os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = "120"
-os.environ["HF_HUB_ETAG_TIMEOUT"] = "60"
-print("Repository ready; HF_TOKEN loaded without displaying it.")
-"""),
-        code("""# Configure this run. Restore a previous checkpoint Dataset between Kaggle sessions.
-PRIOR_RUN_DIR = None  # Example: Path("/kaggle/input/direct-vaani-checkpoints/direct-moe-run")
 RUN_DIR = Path("/kaggle/working/direct-moe-run")
-EXPERIMENT = "moe"  # baseline, moe, top1, no_dialect, no_shared
-RUN_SMOKE = True
-MAX_SMOKE_ATTEMPTS = 3
-MAX_TRAIN_ATTEMPTS = 3
-
-if PRIOR_RUN_DIR and not RUN_DIR.exists():
-    shutil.copytree(PRIOR_RUN_DIR, RUN_DIR)
 RUN_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR = RUN_DIR / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
+SETUP_EXIT_CODE = 0
 
 def run_logged(command, filename):
     log_path = LOG_DIR / filename
@@ -85,12 +64,61 @@ def run_logged(command, filename):
             log_handle.write(message)
             return 127
 
+try:
+    git_command = (
+        ["git", "clone", REPO_URL, str(REPO_DIR)]
+        if not REPO_DIR.exists()
+        else ["git", "-C", str(REPO_DIR), "pull", "--ff-only"]
+    )
+    for setup_command in (
+        git_command,
+        [sys.executable, "-m", "pip", "install", "-q", "-r", str(REPO_DIR / "requirements.txt")],
+        [sys.executable, "-m", "pip", "install", "-q", "-e", str(REPO_DIR)],
+    ):
+        exit_code = run_logged(setup_command, "setup.log")
+        if exit_code != 0:
+            raise RuntimeError(f"Setup command failed with exit code {exit_code}: {setup_command[0]}")
+
+    from kaggle_secrets import UserSecretsClient
+    token = UserSecretsClient().get_secret("HF_TOKEN")
+    if not token:
+        raise RuntimeError("HF_TOKEN is empty")
+    os.environ["HF_TOKEN"] = token
+    os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = "120"
+    os.environ["HF_HUB_ETAG_TIMEOUT"] = "60"
+    print("Repository ready; HF_TOKEN loaded without displaying it.")
+except Exception as exc:
+    SETUP_EXIT_CODE = 1
+    setup_message = f"Setup failed: {type(exc).__name__}: {exc}\\n"
+    print(setup_message, end="")
+    with (LOG_DIR / "setup.log").open("a", encoding="utf-8") as setup_log:
+        setup_log.write(setup_message)
+"""),
+        code("""# Configure this run. Restore a previous checkpoint Dataset between Kaggle sessions.
+PRIOR_RUN_DIR = None  # Example: Path("/kaggle/input/direct-vaani-checkpoints/direct-moe-run")
+EXPERIMENT = "moe"  # baseline, moe, top1, no_dialect, no_shared
+RUN_SMOKE = True
+MAX_SMOKE_ATTEMPTS = 3
+MAX_TRAIN_ATTEMPTS = 3
+CONFIG_EXIT_CODE = 0
+
+if PRIOR_RUN_DIR:
+    try:
+        shutil.copytree(PRIOR_RUN_DIR, RUN_DIR, dirs_exist_ok=True)
+    except Exception as exc:
+        CONFIG_EXIT_CODE = 1
+        config_message = f"Checkpoint restore failed: {type(exc).__name__}: {exc}\\n"
+        print(config_message, end="")
+        with (LOG_DIR / "setup.log").open("a", encoding="utf-8") as setup_log:
+            setup_log.write(config_message)
+
 print(f"experiment={EXPERIMENT} output={RUN_DIR}")
 """),
         code("""# Verify original-stream access plus one forward/backward on both T4 GPUs.
-SMOKE_EXIT_CODE = 0
+SMOKE_EXIT_CODE = None
 SMOKE_ATTEMPTS = 0
-if RUN_SMOKE:
+if SETUP_EXIT_CODE == 0 and CONFIG_EXIT_CODE == 0 and RUN_SMOKE:
+    SMOKE_EXIT_CODE = 1
     for SMOKE_ATTEMPTS in range(1, MAX_SMOKE_ATTEMPTS + 1):
         print(f"Smoke attempt {SMOKE_ATTEMPTS}/{MAX_SMOKE_ATTEMPTS}")
         SMOKE_EXIT_CODE = run_logged([
@@ -104,12 +132,14 @@ if RUN_SMOKE:
         if SMOKE_ATTEMPTS < MAX_SMOKE_ATTEMPTS:
             print("Smoke failed; retrying in 15 seconds (handles transient Hugging Face 503 errors).")
             time.sleep(15)
+else:
+    print("Smoke skipped because setup/configuration failed or RUN_SMOKE is disabled.")
 print(f"smoke_exit_code={SMOKE_EXIT_CODE}")
 """),
         code("""# Three direct dataset passes: frozen encoder, top-4 unfrozen, reduced encoder LR.
 TRAIN_EXIT_CODE = None
 TRAIN_ATTEMPTS = 0
-if SMOKE_EXIT_CODE == 0:
+if SETUP_EXIT_CODE == 0 and CONFIG_EXIT_CODE == 0 and SMOKE_EXIT_CODE == 0:
     for TRAIN_ATTEMPTS in range(1, MAX_TRAIN_ATTEMPTS + 1):
         command = [
             "accelerate", "launch", "--config_file", str(REPO_DIR / "configs/accelerate_t4x2.yaml"),
@@ -129,7 +159,7 @@ if SMOKE_EXIT_CODE == 0:
             print("Training stopped; retrying from the latest checkpoint in 30 seconds.")
             time.sleep(30)
 else:
-    print("Training skipped because the two-GPU smoke test failed.")
+    print("Training skipped because setup/configuration or the two-GPU smoke test failed.")
 print(f"training_exit_code={TRAIN_EXIT_CODE}")
 """),
         code("""# Save a compact manifest and all logs under RUN_DIR for Kaggle output persistence.
@@ -143,15 +173,20 @@ for checkpoint in checkpoints:
         "name": checkpoint.name,
         "bytes": sum(path.stat().st_size for path in checkpoint.rglob("*") if path.is_file()),
     })
-repo_commit = subprocess.check_output(
-    ["git", "-C", str(REPO_DIR), "rev-parse", "HEAD"], text=True
-).strip()
+try:
+    repo_commit = subprocess.check_output(
+        ["git", "-C", str(REPO_DIR), "rev-parse", "HEAD"], text=True
+    ).strip()
+except Exception:
+    repo_commit = "unavailable"
 manifest = {
     "created_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     "repository_commit": repo_commit,
     "experiment": EXPERIMENT,
     "source_dataset": "ARTPARK-IISc/Vaani",
     "source_revision": "d8e3ca3eb483a19c63e196f5379790e5fd8daaad",
+    "setup_exit_code": SETUP_EXIT_CODE,
+    "config_exit_code": CONFIG_EXIT_CODE,
     "smoke_exit_code": SMOKE_EXIT_CODE,
     "smoke_attempts": SMOKE_ATTEMPTS,
     "training_exit_code": TRAIN_EXIT_CODE,
@@ -163,11 +198,17 @@ manifest = {
 (RUN_DIR / "artifact_manifest.json").write_text(
     json.dumps(manifest, indent=2), encoding="utf-8"
 )
-shutil.copy2(REPO_DIR / "configs/direct_streaming.yaml", RUN_DIR / "effective_direct_streaming.yaml")
+effective_config = REPO_DIR / "configs/direct_streaming.yaml"
+if effective_config.exists():
+    shutil.copy2(effective_config, RUN_DIR / "effective_direct_streaming.yaml")
 print(json.dumps(manifest, indent=2))
 print(f"Kaggle will persist checkpoints and logs from: {RUN_DIR}")
 
-if SMOKE_EXIT_CODE != 0:
+if SETUP_EXIT_CODE != 0:
+    raise RuntimeError(f"Setup failed; inspect {LOG_DIR / 'setup.log'} and enable the HF_TOKEN secret")
+if CONFIG_EXIT_CODE != 0:
+    raise RuntimeError(f"Configuration failed; inspect {LOG_DIR / 'setup.log'}")
+if RUN_SMOKE and SMOKE_EXIT_CODE != 0:
     raise RuntimeError(f"Smoke test failed; inspect {LOG_DIR / 'smoke.log'}")
 if TRAIN_EXIT_CODE not in (0, None):
     raise RuntimeError(f"Training failed; inspect {LOG_DIR / 'training.log'}")
