@@ -14,7 +14,7 @@ from pathlib import Path
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--username", required=True)
-    parser.add_argument("--notebook", choices=("creator", "training"), required=True)
+    parser.add_argument("--notebook", choices=("creator", "training", "direct"), required=True)
     parser.add_argument("--processed-dataset", default=None, help="owner/slug; required for training")
     args = parser.parse_args()
     kaggle_executable = shutil.which("kaggle")
@@ -28,8 +28,18 @@ def main():
         raise ValueError("--processed-dataset owner/slug is required for the training notebook")
 
     repository = Path(__file__).resolve().parents[1]
-    code_file = "kaggle_dataset_creator.ipynb" if args.notebook == "creator" else "kaggle_vaani_training.ipynb"
-    slug = "vaani-bengali-processed-builder" if args.notebook == "creator" else "bengali-dialect-mms-moe-training"
+    code_files = {
+        "creator": "kaggle_dataset_creator.ipynb",
+        "training": "kaggle_vaani_training.ipynb",
+        "direct": "kaggle_direct_vaani_training.ipynb",
+    }
+    slugs = {
+        "creator": "vaani-bengali-processed-builder",
+        "training": "bengali-dialect-mms-moe-training",
+        "direct": "direct-vaani-mms-moe-training",
+    }
+    code_file = code_files[args.notebook]
+    slug = slugs[args.notebook]
     metadata = {
         "id": f"{args.username}/{slug}",
         "title": slug.replace("-", " ").title(),
@@ -37,7 +47,7 @@ def main():
         "language": "python",
         "kernel_type": "notebook",
         "is_private": True,
-        "enable_gpu": args.notebook == "training",
+        "enable_gpu": args.notebook in {"training", "direct"},
         "enable_internet": True,
         "dataset_sources": [args.processed_dataset] if args.processed_dataset else [],
         "competition_sources": [],

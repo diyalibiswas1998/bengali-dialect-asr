@@ -18,6 +18,12 @@ from asr_dialect_benchmark.data.build_vaani import (
     wav2vec2_output_frames,
 )
 from asr_dialect_benchmark.data.processed_vaani import ProcessedVaaniDataset
+from asr_dialect_benchmark.data.streaming_vaani import (
+    StreamingOptions,
+    VaaniStreamingDataset,
+    fixed_bengali_tokenizer,
+    speaker_split,
+)
 from asr_dialect_benchmark.training.sampler import LengthBucketBatchSampler
 from asr_dialect_benchmark.evaluation.metrics import asr_rates, classification_report
 from asr_dialect_benchmark.losses.ctc_losses import multitask_loss
@@ -197,3 +203,41 @@ def test_full_model_and_multitask_loss_forward_backward(monkeypatch):
     assert model.ctc_head.weight.grad is not None
     assert model.moe.router.proj2.weight.grad is not None
     assert any(parameter.requires_grad for parameter in model.encoder.encoder.layers[-2:].parameters())
+
+
+def test_direct_stream_preserves_16khz_waveform_and_speaker_split(monkeypatch):
+    train_speaker = next(
+        f"stream-speaker-{index}"
+        for index in range(10_000)
+        if speaker_split(f"stream-speaker-{index}", 42) == "train"
+    )
+    waveform = np.linspace(-0.5, 0.5, 16_000, dtype=np.float32)
+    row = {
+        "audio": {"array": waveform, "sampling_rate": 16_000},
+        "transcript": "বাংলা কথা",
+        "language": "Bengali",
+        "district": "Kolkata",
+        "speakerID": train_speaker,
+        "residence_district": "Kolkata",
+        "sample_id": "direct-sample",
+    }
+    tokenizer = fixed_bengali_tokenizer()
+    dataset = VaaniStreamingDataset(
+        StreamingOptions(
+            split="train",
+            token="synthetic-token",
+            revision="synthetic-revision",
+            max_samples=1,
+        ),
+        tokenizer,
+    )
+    monkeypatch.setattr(dataset, "_source_streams", lambda: iter([("WestBengal_Kolkata", [row])]))
+    sample = next(iter(dataset))
+
+    assert torch.equal(sample["input_values"], torch.from_numpy(waveform))
+    assert tokenizer.unk_token_id not in sample["target"].tolist()
+    assert sample["dialect_label_mask"].item()
+    assert sample["source_district"] == "Kolkata"
+    assignments = [speaker_split(f"speaker-{index}", 42) for index in range(2_000)]
+    assert 0.75 < assignments.count("train") / len(assignments) < 0.85
+    assert set(assignments) == {"train", "validation", "test"}
