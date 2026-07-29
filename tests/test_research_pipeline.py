@@ -1,16 +1,27 @@
 from collections import Counter, defaultdict
 import hashlib
+import json
+from types import SimpleNamespace
+
+import numpy as np
+import torch
+import torch.nn as nn
 
 from asr_dialect_benchmark.common.constants import DIALECT_TO_IDX, DISTRICT_TO_DIALECT
 from asr_dialect_benchmark.data.build_vaani import (
+    BuildOptions,
     SCHEMA,
     assign_speaker_splits,
+    build_processed_corpus,
     normalize_district,
     update_record_fingerprint,
     wav2vec2_output_frames,
 )
+from asr_dialect_benchmark.data.processed_vaani import ProcessedVaaniDataset
 from asr_dialect_benchmark.training.sampler import LengthBucketBatchSampler
 from asr_dialect_benchmark.evaluation.metrics import asr_rates, classification_report
+from asr_dialect_benchmark.losses.ctc_losses import multitask_loss
+from asr_dialect_benchmark.modeling.asr_model import BengaliDialectASR
 from asr_dialect_benchmark.tokenization.simple_tokenizer import SimpleTokenizer, normalize_bengali_text
 
 
@@ -81,3 +92,108 @@ def test_storage_local_sampler_keeps_row_groups_contiguous():
     transitions = sum(groups[left] != groups[right] for left, right in zip(ordered, ordered[1:]))
     assert transitions == 1
     assert wav2vec2_output_frames(16_000) > 0
+
+
+def test_synthetic_corpus_builds_and_loads_end_to_end(tmp_path, monkeypatch):
+    districts = list(DISTRICT_TO_DIALECT)
+    rows = []
+    for index in range(12):
+        district = districts[index % len(districts)]
+        rows.append(
+            {
+                "audio": {
+                    "array": np.full(16_000, (index + 1) / 100.0, dtype=np.float32),
+                    "sampling_rate": 16_000,
+                },
+                "transcript": "বাংলা কথা",
+                "language": "Bengali",
+                "district": district,
+                "speakerID": f"speaker-{index}",
+                "duration": 1.0,
+                "residence_district": district,
+                "sample_id": f"sample-{index}",
+            }
+        )
+
+    monkeypatch.setattr(
+        "asr_dialect_benchmark.data.build_vaani._hf_streams",
+        lambda options: iter([("Bengali", rows)]),
+    )
+    output = build_processed_corpus(
+        BuildOptions(output_dir=str(tmp_path / "processed"), shard_size=3)
+    )
+
+    metadata = json.loads((output / "metadata.json").read_text(encoding="utf-8"))
+    assert sum(metadata["splits"][split]["samples"] for split in metadata["splits"]) == 12
+    assert (output / "vocab.json").exists()
+    assert (output / "dialect_mapping.json").exists()
+
+    loaded = 0
+    for split in ("train", "validation", "test"):
+        dataset = ProcessedVaaniDataset(output, split)
+        loaded += len(dataset)
+        if len(dataset):
+            sample = dataset[0]
+            assert sample["input_values"].numel() == 16_000
+            assert sample["speaker_id"].startswith("speaker-")
+    assert loaded == 12
+
+
+def test_full_model_and_multitask_loss_forward_backward(monkeypatch):
+    class FakeEncoder(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(hidden_size=8)
+            self.projection = nn.Linear(1, 8)
+            self.encoder = nn.Module()
+            self.encoder.layers = nn.ModuleList(nn.Linear(8, 8) for _ in range(6))
+            self.encoder.layer_norm = nn.LayerNorm(8)
+
+        def gradient_checkpointing_enable(self):
+            return None
+
+        def _get_feat_extract_output_lengths(self, lengths):
+            return torch.div(lengths + 3, 4, rounding_mode="floor")
+
+        def forward(self, input_values, attention_mask=None):
+            hidden = self.projection(input_values[:, ::4].unsqueeze(-1))
+            for layer in self.encoder.layers:
+                hidden = torch.tanh(layer(hidden))
+            return SimpleNamespace(last_hidden_state=self.encoder.layer_norm(hidden))
+
+    monkeypatch.setattr(
+        "asr_dialect_benchmark.modeling.asr_model.AutoModel.from_pretrained",
+        lambda *_args, **_kwargs: FakeEncoder(),
+    )
+    model = BengaliDialectASR(
+        {
+            "pretrained_model": "synthetic",
+            "num_tokens": 16,
+            "num_dialects": 4,
+            "top_k": 2,
+            "dropout": 0.0,
+            "gradient_checkpointing": False,
+        }
+    )
+    model.set_phase(2, top_layers=2)
+    input_values = torch.randn(2, 160)
+    attention_mask = torch.ones_like(input_values, dtype=torch.long)
+    outputs = model(
+        input_values=input_values,
+        attention_mask=attention_mask,
+        input_lengths=torch.tensor([160, 144]),
+    )
+    batch = {
+        "targets": torch.tensor([1, 2, 3, 2, 3, 4], dtype=torch.long),
+        "target_lengths": torch.tensor([3, 3], dtype=torch.long),
+        "dialect_labels": torch.tensor([0, 1], dtype=torch.long),
+        "dialect_label_mask": torch.tensor([True, True]),
+    }
+    loss, components = multitask_loss(outputs, batch)
+    loss.backward()
+
+    assert torch.isfinite(loss)
+    assert all(torch.isfinite(value) for value in components.values())
+    assert model.ctc_head.weight.grad is not None
+    assert model.moe.router.proj2.weight.grad is not None
+    assert any(parameter.requires_grad for parameter in model.encoder.encoder.layers[-2:].parameters())
