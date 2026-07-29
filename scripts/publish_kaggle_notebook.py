@@ -2,9 +2,11 @@
 """Package and push the maintained notebooks with the Kaggle CLI."""
 
 import argparse
+import importlib.util
 import json
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -15,7 +17,12 @@ def main():
     parser.add_argument("--notebook", choices=("creator", "training"), required=True)
     parser.add_argument("--processed-dataset", default=None, help="owner/slug; required for training")
     args = parser.parse_args()
-    if not shutil.which("kaggle"):
+    kaggle_executable = shutil.which("kaggle")
+    if kaggle_executable:
+        kaggle_command = [kaggle_executable]
+    elif importlib.util.find_spec("kaggle"):
+        kaggle_command = [sys.executable, "-m", "kaggle"]
+    else:
         raise RuntimeError("Install the Kaggle CLI and configure ~/.kaggle/kaggle.json first")
     if args.notebook == "training" and not args.processed_dataset:
         raise ValueError("--processed-dataset owner/slug is required for the training notebook")
@@ -40,7 +47,7 @@ def main():
         package = Path(temporary)
         shutil.copy2(repository / code_file, package / code_file)
         (package / "kernel-metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-        subprocess.check_call(["kaggle", "kernels", "push", "-p", str(package)])
+        subprocess.check_call([*kaggle_command, "kernels", "push", "-p", str(package)])
     print(f"Pushed private Kaggle notebook: https://www.kaggle.com/code/{args.username}/{slug}")
 
 
