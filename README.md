@@ -40,6 +40,8 @@ accelerate launch --config_file configs/accelerate_t4x2.yaml \
   --resume latest
 ```
 
+To publish either maintained notebook through the Kaggle API, configure the Kaggle CLI and run `python scripts/publish_kaggle_notebook.py --username YOUR_USER --notebook creator`; after the processed Dataset exists, publish training with `--notebook training --processed-dataset OWNER/SLUG`. Kernel pushes are private and start a Kaggle execution.
+
 Omit `--resume` for the first session. Preserve `/kaggle/working/moe-run` as a private Kaggle Dataset version between sessions, restore it before the next run, and then use `--resume latest`.
 
 The three passes are fixed by `configs/research.yaml`:

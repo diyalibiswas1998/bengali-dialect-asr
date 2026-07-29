@@ -34,14 +34,21 @@ if not REPO_DIR.exists():
 subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "-r", str(REPO_DIR / "requirements.txt")])
 subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "-e", str(REPO_DIR)])
 """),
-        code("""# Edit these paths to match the attached Kaggle Dataset slugs.
-DATASET_DIR = Path("/kaggle/input/vaani-bengali-processed")
+        code("""# Auto-detect the attached processed Vaani Dataset.
+dataset_candidates = [
+    path for path in Path("/kaggle/input").iterdir()
+    if (path / "metadata.json").exists() and (path / "vocab.json").exists()
+]
+if len(dataset_candidates) != 1:
+    raise RuntimeError(
+        "Attach exactly one processed Vaani Dataset; found "
+        f"{[str(path) for path in dataset_candidates]}"
+    )
+DATASET_DIR = dataset_candidates[0]
 PRIOR_RUN_DIR = None  # Example: Path("/kaggle/input/bengali-moe-checkpoints/moe-run")
 RUN_DIR = Path("/kaggle/working/moe-run")
 EXPERIMENT = "moe"  # baseline, moe, top1, no_dialect, or no_shared
 
-if not (DATASET_DIR / "metadata.json").exists():
-    raise FileNotFoundError(f"Processed dataset not found at {DATASET_DIR}")
 if PRIOR_RUN_DIR and not RUN_DIR.exists():
     shutil.copytree(PRIOR_RUN_DIR, RUN_DIR)
 RUN_DIR.mkdir(parents=True, exist_ok=True)
