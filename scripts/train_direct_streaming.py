@@ -269,7 +269,13 @@ def main():
         ],
         weight_decay=float(config.training.weight_decay),
     )
-    updates_per_phase = int(config.training.estimated_optimizer_steps_per_phase)
+    updates_per_phase = int(
+        config.training.get(
+            "steps_per_phase", config.training.estimated_optimizer_steps_per_phase
+        )
+    )
+    if updates_per_phase <= 0:
+        raise ValueError("training.steps_per_phase must be greater than zero")
     total_updates = updates_per_phase * 3
     scheduler = get_linear_schedule_with_warmup(
         optimizer,
@@ -278,7 +284,13 @@ def main():
     )
     model, optimizer, scheduler = accelerator.prepare(model, optimizer, scheduler)
 
-    state = {"phase": 1, "batch_in_phase": 0, "global_step": 0, "complete": False}
+    state = {
+        "phase": 1,
+        "phase_step": 0,
+        "batch_in_phase": 0,
+        "global_step": 0,
+        "complete": False,
+    }
     existing = latest_checkpoint(output_dir)
     if existing and not args.resume:
         raise RuntimeError(f"{output_dir} contains checkpoints; pass --resume latest")
@@ -292,11 +304,23 @@ def main():
             raise RuntimeError("Refusing to resume a different experiment")
         state = json.loads((resume / "trainer_state.json").read_text(encoding="utf-8"))
         accelerator.load_state(str(resume))
+        state.setdefault(
+            "phase_step",
+            max(0, int(state["global_step"]) - (int(state["phase"]) - 1) * updates_per_phase),
+        )
         accelerator.print(
-            f"Resumed {resume}: phase={state['phase']} batch={state['batch_in_phase']} step={state['global_step']}"
+            f"Resumed {resume}: phase={state['phase']}/3 "
+            f"phase_step={state['phase_step']}/{updates_per_phase} "
+            f"batch={state['batch_in_phase']} global_step={state['global_step']}"
         )
 
     for phase in range(int(state["phase"]), 4):
+        phase_step = int(state["phase_step"]) if phase == int(state["phase"]) else 0
+        accelerator.print(
+            f"Starting phase={phase}/3 phase_step={phase_step}/{updates_per_phase} "
+            f"global_step={state['global_step']}",
+            flush=True,
+        )
         unwrapped = accelerator.unwrap_model(model)
         unwrapped.set_phase(phase, int(config.training.unfrozen_top_layers))
         raw_scheduler = getattr(scheduler, "scheduler", scheduler)
@@ -320,6 +344,8 @@ def main():
         model.train()
         routing_buffer = []
         for relative_batch, batch in enumerate(phase_loader):
+            if phase_step >= updates_per_phase:
+                break
             absolute_batch = start_batch + relative_batch
             with accelerator.accumulate(model):
                 outputs = model(batch["input_values"], batch["attention_mask"], batch["input_lengths"])
@@ -350,11 +376,20 @@ def main():
                     routing_buffer.clear()
             if accelerator.sync_gradients:
                 state["global_step"] += 1
-                state.update(phase=phase, batch_in_phase=absolute_batch + 1, complete=False)
-                if state["global_step"] % int(config.training.log_every_steps) == 0:
+                phase_step += 1
+                state.update(
+                    phase=phase,
+                    phase_step=phase_step,
+                    batch_in_phase=absolute_batch + 1,
+                    complete=False,
+                )
+                if phase_step % int(config.training.log_every_steps) == 0:
                     accelerator.print(
-                        f"phase={phase} step={state['global_step']} loss={loss.item():.4f} "
-                        f"ctc={parts['ctc'].item():.4f} dialect={parts['dialect'].item():.4f}"
+                        f"progress phase={phase}/3 phase_step={phase_step}/{updates_per_phase} "
+                        f"global_step={state['global_step']}/{updates_per_phase * 3} "
+                        f"loss={loss.item():.4f} ctc={parts['ctc'].item():.4f} "
+                        f"dialect={parts['dialect'].item():.4f}",
+                        flush=True,
                     )
                 if state["global_step"] % int(config.training.checkpoint_every_steps) == 0:
                     save_checkpoint(
@@ -366,6 +401,12 @@ def main():
                         output_dir,
                         int(config.training.keep_last_step_checkpoints),
                     )
+
+        if phase_step < updates_per_phase:
+            raise RuntimeError(
+                f"Training data ended in phase {phase} at optimizer step "
+                f"{phase_step}/{updates_per_phase}."
+            )
 
         validation_loader = accelerator.prepare_data_loader(
             make_loader(
@@ -380,7 +421,13 @@ def main():
         )
         value = validation_loss(model, validation_loader, config, accelerator)
         accelerator.print(f"phase={phase} validation_loss={value:.4f}")
-        state.update(phase=phase + 1, batch_in_phase=0, validation_loss=value, complete=phase == 3)
+        state.update(
+            phase=phase + 1,
+            phase_step=0,
+            batch_in_phase=0,
+            validation_loss=value,
+            complete=phase == 3,
+        )
         save_checkpoint(accelerator, model, output_dir, f"checkpoint-phase-{phase}", state, config, tokenizer)
 
     accelerator.print(f"Direct-stream training complete at optimizer step {state['global_step']}")

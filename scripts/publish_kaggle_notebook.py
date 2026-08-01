@@ -14,7 +14,9 @@ from pathlib import Path
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--username", required=True)
-    parser.add_argument("--notebook", choices=("creator", "training", "direct"), required=True)
+    parser.add_argument(
+        "--notebook", choices=("creator", "training", "direct", "local-four"), required=True
+    )
     parser.add_argument("--processed-dataset", default=None, help="owner/slug; required for training")
     args = parser.parse_args()
     kaggle_executable = shutil.which("kaggle")
@@ -32,11 +34,13 @@ def main():
         "creator": "kaggle_dataset_creator.ipynb",
         "training": "kaggle_vaani_training.ipynb",
         "direct": "kaggle_direct_vaani_training.ipynb",
+        "local-four": "kaggle_local_four_dialect_training.ipynb",
     }
     slugs = {
         "creator": "vaani-bengali-processed-builder",
         "training": "bengali-dialect-mms-moe-training",
         "direct": "direct-vaani-mms-moe-training",
+        "local-four": "local-four-dialect-mms-moe-training",
     }
     code_file = code_files[args.notebook]
     slug = slugs[args.notebook]
@@ -47,7 +51,7 @@ def main():
         "language": "python",
         "kernel_type": "notebook",
         "is_private": True,
-        "enable_gpu": args.notebook in {"training", "direct"},
+        "enable_gpu": args.notebook in {"training", "direct", "local-four"},
         "enable_internet": True,
         "dataset_sources": [args.processed_dataset] if args.processed_dataset else [],
         "competition_sources": [],

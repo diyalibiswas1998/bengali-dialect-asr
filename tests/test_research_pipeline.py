@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 import torch
 import torch.nn as nn
+from omegaconf import OmegaConf
 
 from asr_dialect_benchmark.common.constants import DIALECT_TO_IDX, DISTRICT_TO_DIALECT
 from asr_dialect_benchmark.data.build_vaani import (
@@ -356,3 +357,41 @@ def test_generated_notebook_contains_no_hardcoded_huggingface_token():
     text = (root / "scripts" / "gen_direct_notebook.py").read_text(encoding="utf-8")
     text += (root / "kaggle_direct_vaani_training.ipynb").read_text(encoding="utf-8")
     assert re.search(r"hf_[A-Za-z0-9]{16,}", text) is None
+
+
+def test_local_four_dialect_config_has_requested_schedule():
+    root = Path(__file__).resolve().parents[1]
+    config = OmegaConf.load(root / "configs" / "local_four_dialect.yaml")
+    assert config.model.num_dialects == 4
+    assert config.training.steps_per_phase == 1000
+    assert config.training.estimated_optimizer_steps_per_phase == 1000
+    assert config.training.log_every_steps == 200
+    assert config.training.checkpoint_every_steps == 100
+
+
+def test_local_four_dialect_notebook_is_local_only_and_uses_trainer():
+    root = Path(__file__).resolve().parents[1]
+    notebook_path = root / "kaggle_local_four_dialect_training.ipynb"
+    notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
+    code_text = "\n".join(
+        "".join(cell["source"])
+        for cell in notebook["cells"]
+        if cell["cell_type"] == "code"
+    )
+    for cell in notebook["cells"]:
+        if cell["cell_type"] == "code":
+            source = "".join(cell["source"])
+            compile(source, f"notebook-{cell['id']}", "exec")
+
+    assert 'str(REPO_DIR / "scripts/trainer.py")' in code_text
+    assert 'str(REPO_DIR / "configs/local_four_dialect.yaml")' in code_text
+    assert 'os.environ["VAANI_ALLOW_HF_FALLBACK"] = "0"' in code_text
+    assert "smoke_direct_streaming.py" not in code_text
+    assert "load_dataset(" not in code_text
+    assert "--max-train-samples" not in code_text
+    assert set(DISTRICT_TO_DIALECT) == {
+        "Alipurduar", "CoochBehar", "Darjeeling", "Jalpaiguri",
+        "Jhargram", "PaschimMedinipur", "Purulia", "Malda",
+        "DakshinDinajpur", "North24Parganas", "Kolkata",
+    }
+    assert set(DIALECT_TO_IDX) == {"Rarhi", "Varendri", "Jharkhandi", "Kamrupi"}

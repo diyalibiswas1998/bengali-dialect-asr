@@ -46,6 +46,8 @@ To publish either maintained notebook through the Kaggle API, configure the Kagg
 
 To train directly from the uploaded paired files, use `kaggle_direct_vaani_training.ipynb` or publish it with `python scripts/publish_kaggle_notebook.py --username YOUR_USER --notebook direct`. The attached Dataset must contain `train/`, `validation/`, and `test/`, each with the same 11 district folders and paired `.wav`/`.txt` files. The loader ignores every other district, preserves the supplied splits, globally shuffles the selected training rows, and derives the four dialect proxy labels from the district folder. It uses local-only mode by default and needs no Vaani Hugging Face token.
 
+For the fixed short schedule, use `kaggle_local_four_dialect_training.ipynb` or publish it with `python scripts/publish_kaggle_notebook.py --username YOUR_USER --notebook local-four`. This separate notebook invokes `scripts/trainer.py`, has no preliminary test run, and hard-disables dataset fallback. `configs/local_four_dialect.yaml` runs exactly 1,000 optimizer steps in each of three phases, prints progress every 200 phase steps, and writes resumable checkpoints every 100 global optimizer steps.
+
 Omit `--resume` for the first session. Preserve `/kaggle/working/moe-run` as a private Kaggle Dataset version between sessions, restore it before the next run, and then use `--resume latest`.
 
 The three passes are fixed by `configs/research.yaml`:
