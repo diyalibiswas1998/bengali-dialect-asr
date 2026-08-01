@@ -12,8 +12,6 @@ def code(text):
     return {"cell_type": "code", "execution_count": None, "metadata": {}, "outputs": [], "source": text.splitlines(keepends=True)}
 
 
-KAGGLE_DATASET_SOURCE = "diyalibiswas/vaani-westbengal-parquet"
-
 notebook = {
     "nbformat": 4,
     "nbformat_minor": 5,
@@ -23,13 +21,6 @@ notebook = {
             "accelerator": "gpu",
             "isInternetEnabled": True,
             "isGpuEnabled": True,
-            "dataSources": [
-                {
-                    "sourceType": "datasetVersion",
-                    "sourceId": KAGGLE_DATASET_SOURCE,
-                    "datasetId": KAGGLE_DATASET_SOURCE,
-                }
-            ],
         },
     },
     "cells": [
