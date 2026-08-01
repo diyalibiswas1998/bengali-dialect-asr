@@ -72,6 +72,7 @@ class StreamingOptions:
     split: str
     token: str
     revision: str
+    allow_hf_fallback: bool = True
     seed: int = 42
     epoch: int = 0
     min_duration: float = 0.5
@@ -87,8 +88,6 @@ class VaaniStreamingDataset(IterableDataset):
         super().__init__()
         if options.split not in {"train", "validation", "test"}:
             raise ValueError(f"Unknown split: {options.split}")
-        if not options.token:
-            raise ValueError("A Hugging Face token is required for gated Vaani streaming")
         self.options = options
         self.tokenizer = tokenizer or fixed_bengali_tokenizer()
 
@@ -171,6 +170,14 @@ class VaaniStreamingDataset(IterableDataset):
                     dataset = None
 
             if dataset is None:
+                if not self.options.allow_hf_fallback:
+                    raise RuntimeError(
+                        f"No local Parquet files matched {config} and Hugging Face fallback is disabled"
+                    )
+                if not self.options.token:
+                    raise RuntimeError(
+                        f"No local Parquet files matched {config}; HF_TOKEN is required only for fallback"
+                    )
                 dataset = load_dataset(
                     "ARTPARK-IISc/Vaani",
                     config,

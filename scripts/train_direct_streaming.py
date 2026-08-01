@@ -164,11 +164,15 @@ def direct_training_collate(batch):
 
 
 def make_loader(config, token, tokenizer, split, epoch, max_samples=None, batch_size=None):
+    allow_hf_fallback = os.environ.get("VAANI_ALLOW_HF_FALLBACK", "1").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
     dataset = VaaniStreamingDataset(
         StreamingOptions(
             split=split,
             token=token,
             revision=str(config.data.revision),
+            allow_hf_fallback=allow_hf_fallback,
             seed=int(config.seed),
             epoch=epoch,
             min_duration=float(config.data.min_duration),
@@ -219,8 +223,6 @@ def main():
     args = parser.parse_args()
 
     token = os.environ.get(args.token_env, "")
-    if not token:
-        raise RuntimeError(f"Missing gated-dataset token in environment variable {args.token_env}")
     config = experiment_config(OmegaConf.load(args.config), args.experiment)
     config.output_dir = args.output_dir
     config.run_max_train_samples = args.max_train_samples
@@ -237,6 +239,7 @@ def main():
         "mapping_version": DIALECT_MAPPING_VERSION,
         "streaming_layout": "district-safe-v2",
         "local_config_override": os.environ.get("VAANI_LOCAL_CONFIG", ""),
+        "allow_hf_fallback": os.environ.get("VAANI_ALLOW_HF_FALLBACK", "1"),
     }
 
     accelerator = Accelerator(

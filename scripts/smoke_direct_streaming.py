@@ -22,8 +22,6 @@ def main():
     parser.add_argument("--require-two-gpus", action="store_true")
     args = parser.parse_args()
     token = os.environ.get(args.token_env, "")
-    if not token:
-        raise RuntimeError(f"Missing {args.token_env}")
     config = OmegaConf.load(args.config)
     tokenizer = fixed_bengali_tokenizer()
     config.model.num_tokens = len(tokenizer.vocab)

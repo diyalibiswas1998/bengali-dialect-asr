@@ -233,8 +233,9 @@ def test_direct_stream_preserves_16khz_waveform_and_speaker_split(monkeypatch):
     dataset = VaaniStreamingDataset(
         StreamingOptions(
             split="train",
-            token="synthetic-token",
+            token="",
             revision="synthetic-revision",
+            allow_hf_fallback=False,
             max_samples=1,
         ),
         tokenizer,
@@ -249,6 +250,21 @@ def test_direct_stream_preserves_16khz_waveform_and_speaker_split(monkeypatch):
     assignments = [speaker_split(f"speaker-{index}", 42) for index in range(2_000)]
     assert 0.75 < assignments.count("train") / len(assignments) < 0.85
     assert set(assignments) == {"train", "validation", "test"}
+
+
+def test_local_only_mode_fails_without_local_files_instead_of_requesting_token(monkeypatch):
+    monkeypatch.delenv("VAANI_PARQUET_CACHE", raising=False)
+    dataset = VaaniStreamingDataset(
+        StreamingOptions(
+            split="train",
+            token="",
+            revision="synthetic-revision",
+            allow_hf_fallback=False,
+        ),
+        fixed_bengali_tokenizer(),
+    )
+    with pytest.raises(RuntimeError, match="fallback is disabled"):
+        next(dataset._source_streams())
 
 
 def test_direct_notebook_saves_manifest_when_setup_fails(tmp_path):

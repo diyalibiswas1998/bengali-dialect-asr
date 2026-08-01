@@ -26,9 +26,9 @@ notebook = {
     "cells": [
         markdown("""# Direct original-Vaani MMS-300M dialect MoE training
 
-This notebook streams the original 11 West Bengal Vaani configurations during every pass. It does **not** write a derived audio dataset. Audio is decoded in memory, mixed to mono when necessary, and resampled to 16 kHz only because MMS requires 16 kHz input.
+This notebook reads the attached original Vaani Parquet files directly during every pass. It does **not** write a derived audio dataset and defaults to local-only mode, so no Hugging Face token is needed. Audio is decoded in memory, mixed to mono when necessary, and resampled to 16 kHz only because MMS requires 16 kHz input.
 
-Trade-offs: the stable speaker-hash split is globally disjoint but not globally stratified; a mid-pass resume replays and skips the earlier stream; Hugging Face availability directly affects training; and three full passes can exceed several Kaggle sessions.
+Trade-offs: the stable speaker-hash split is globally disjoint but not globally stratified; a mid-pass resume replays and skips earlier local rows; and three full passes can exceed several Kaggle sessions.
 """),
         code("""import os, shutil, subprocess, sys, time
 from pathlib import Path
@@ -83,19 +83,10 @@ try:
         if exit_code != 0:
             raise RuntimeError(f"Setup command failed with exit code {exit_code}: {setup_command[0]}")
 
-    try:
-        from kaggle_secrets import UserSecretsClient
-        token = UserSecretsClient().get_secret("HF_TOKEN")
-    except Exception as exc:
-        raise RuntimeError(
-            "Enable the HF_TOKEN secret for this notebook before Save & Run All"
-        ) from exc
-    if not token:
-        raise RuntimeError("HF_TOKEN is empty")
-    os.environ["HF_TOKEN"] = token
+    os.environ.pop("HF_TOKEN", None)
     os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = "120"
     os.environ["HF_HUB_ETAG_TIMEOUT"] = "60"
-    print("Repository ready; HF_TOKEN loaded without displaying it.")
+    print("Repository ready; local Vaani data requires no Hugging Face token.")
 except Exception as exc:
     SETUP_EXIT_CODE = 1
     setup_message = f"Setup failed: {type(exc).__name__}: {exc}\\n"
@@ -109,7 +100,23 @@ EXPERIMENT = "moe"  # baseline, moe, top1, no_dialect, no_shared
 RUN_SMOKE = False
 MAX_SMOKE_ATTEMPTS = 1
 MAX_TRAIN_ATTEMPTS = 3
+USE_HF_FALLBACK = False
 CONFIG_EXIT_CODE = 0
+
+os.environ["VAANI_ALLOW_HF_FALLBACK"] = "1" if USE_HF_FALLBACK else "0"
+if USE_HF_FALLBACK:
+    try:
+        from kaggle_secrets import UserSecretsClient
+        fallback_token = UserSecretsClient().get_secret("HF_TOKEN")
+        if not fallback_token:
+            raise RuntimeError("HF_TOKEN is empty")
+        os.environ["HF_TOKEN"] = fallback_token
+    except Exception as exc:
+        CONFIG_EXIT_CODE = 1
+        config_message = f"HF fallback requested but HF_TOKEN is unavailable: {type(exc).__name__}: {exc}\\n"
+        print(config_message, end="")
+        with (LOG_DIR / "setup.log").open("a", encoding="utf-8") as setup_log:
+            setup_log.write(config_message)
 
 if PRIOR_RUN_DIR:
     try:
@@ -172,7 +179,14 @@ if target_dir is not None:
         print(f"Selected local Vaani cache: {target_dir} ({len(local_parquets)} Parquet files)")
 else:
     print("No attached local Parquet dataset found in /kaggle/input.")
-    print("Training will stream missing data directly from Hugging Face.")
+    if USE_HF_FALLBACK:
+        print("Training will stream missing data directly from Hugging Face.")
+    else:
+        CONFIG_EXIT_CODE = 1
+        config_message = "Attach the local Vaani Parquet Dataset; HF fallback is disabled.\\n"
+        print(config_message, end="")
+        with (LOG_DIR / "setup.log").open("a", encoding="utf-8") as setup_log:
+            setup_log.write(config_message)
 """),
         code("""# Optional two-GPU data/model forward-backward smoke test.
 SMOKE_EXIT_CODE = 0
@@ -267,7 +281,7 @@ print(json.dumps(manifest, indent=2))
 print(f"Kaggle will persist checkpoints and logs from: {RUN_DIR}")
 
 if SETUP_EXIT_CODE != 0:
-    raise RuntimeError(f"Setup failed; inspect {LOG_DIR / 'setup.log'} and enable the HF_TOKEN secret")
+    raise RuntimeError(f"Setup failed; inspect {LOG_DIR / 'setup.log'}")
 if CONFIG_EXIT_CODE != 0:
     raise RuntimeError(f"Configuration failed; inspect {LOG_DIR / 'setup.log'}")
 if RUN_SMOKE and SMOKE_EXIT_CODE != 0:
@@ -281,7 +295,7 @@ else:
 """),
         markdown("""## Session handoff
 
-The notebook checkpoints every 250 optimizer steps and at each phase boundary. After each Kaggle session, publish `/kaggle/working/direct-moe-run` as a private Dataset version. Attach it next session and set `PRIOR_RUN_DIR`. Resume is deterministic but must replay the original stream up to `batch_in_phase`, so phase-boundary resumes are much faster than mid-phase resumes.
+The notebook checkpoints every 250 optimizer steps and at each phase boundary. After each Kaggle session, publish `/kaggle/working/direct-moe-run` as a private Dataset version. Attach it next session and set `PRIOR_RUN_DIR`. Resume is deterministic but must replay local rows up to `batch_in_phase`, so phase-boundary resumes are much faster than mid-phase resumes.
 """),
     ],
 }
