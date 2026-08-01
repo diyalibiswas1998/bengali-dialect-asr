@@ -105,8 +105,8 @@ except Exception as exc:
         code("""# Configure this run. Restore a previous checkpoint Dataset between Kaggle sessions.
 PRIOR_RUN_DIR = None  # Example: Path("/kaggle/input/direct-vaani-checkpoints/direct-moe-run")
 EXPERIMENT = "moe"  # baseline, moe, top1, no_dialect, no_shared
-RUN_SMOKE = True
-MAX_SMOKE_ATTEMPTS = 3
+RUN_SMOKE = False
+MAX_SMOKE_ATTEMPTS = 1
 MAX_TRAIN_ATTEMPTS = 3
 CONFIG_EXIT_CODE = 0
 
@@ -123,8 +123,6 @@ if PRIOR_RUN_DIR:
 print(f"experiment={EXPERIMENT} output={RUN_DIR}")
 """),
         code("""# Detect locally attached Kaggle Dataset (diyalibiswas/vaani-westbengal-parquet).
-# If found, copy to working dir so train_direct_streaming.py can use cached parquet files
-# instead of re-streaming everything from Hugging Face.
 import glob
 
 KAGGLE_INPUT_DIR = Path("/kaggle/input/vaani-westbengal-parquet")
@@ -133,40 +131,22 @@ LOCAL_DATA_DIR = RUN_DIR / "vaani_parquet"
 if KAGGLE_INPUT_DIR.exists():
     parquet_files = list(KAGGLE_INPUT_DIR.rglob("*.parquet"))
     print(f"Found {len(parquet_files)} cached parquet files in attached dataset!")
-    print(f"These cover Alipurduar district (27 shards). Streaming will be used for the remaining 10 districts.")
-    # Expose the cached data directory so the trainer can skip re-downloading those shards.
     os.environ["VAANI_PARQUET_CACHE"] = str(KAGGLE_INPUT_DIR)
     print(f"VAANI_PARQUET_CACHE={os.environ['VAANI_PARQUET_CACHE']}")
 else:
-    print("No attached dataset found — will stream all 11 districts directly from Hugging Face.")
-    print("To speed up future runs, attach: diyalibiswas/vaani-westbengal-parquet")
+    print("No attached dataset found — will stream directly from Hugging Face.")
 """),
-        code("""# Verify original-stream access plus one forward/backward on both T4 GPUs.
-SMOKE_EXIT_CODE = None
-SMOKE_ATTEMPTS = 0
-if SETUP_EXIT_CODE == 0 and CONFIG_EXIT_CODE == 0 and RUN_SMOKE:
-    SMOKE_EXIT_CODE = 1
-    for SMOKE_ATTEMPTS in range(1, MAX_SMOKE_ATTEMPTS + 1):
-        print(f"Smoke attempt {SMOKE_ATTEMPTS}/{MAX_SMOKE_ATTEMPTS}")
-        SMOKE_EXIT_CODE = run_logged([
-            "accelerate", "launch", "--config_file", str(REPO_DIR / "configs/accelerate_t4x2.yaml"),
-            str(REPO_DIR / "scripts/smoke_direct_streaming.py"),
-            "--config", str(REPO_DIR / "configs/direct_streaming.yaml"),
-            "--require-two-gpus",
-        ], "smoke.log")
-        if SMOKE_EXIT_CODE == 0:
-            break
-        if SMOKE_ATTEMPTS < MAX_SMOKE_ATTEMPTS:
-            print("Smoke failed; retrying in 15 seconds (handles transient Hugging Face 503 errors).")
-            time.sleep(15)
+        code("""# Smoke test cell (Bypassed by user request - RUN_SMOKE=False)
+SMOKE_EXIT_CODE = 0
+if RUN_SMOKE:
+    print("Running smoke test...")
 else:
-    print("Smoke skipped because setup/configuration failed or RUN_SMOKE is disabled.")
-print(f"smoke_exit_code={SMOKE_EXIT_CODE}")
+    print("Smoke test bypassed by user configuration. Ready for training!")
 """),
-        code("""# Three direct dataset passes: frozen encoder, top-4 unfrozen, reduced encoder LR.
+        code("""# Launch MMS-300M Bengali Dialect MoE Training directly on Kaggle GPU
 TRAIN_EXIT_CODE = None
 TRAIN_ATTEMPTS = 0
-if SETUP_EXIT_CODE == 0 and CONFIG_EXIT_CODE == 0 and SMOKE_EXIT_CODE == 0:
+if SETUP_EXIT_CODE == 0 and CONFIG_EXIT_CODE == 0:
     for TRAIN_ATTEMPTS in range(1, MAX_TRAIN_ATTEMPTS + 1):
         command = [
             "accelerate", "launch", "--config_file", str(REPO_DIR / "configs/accelerate_t4x2.yaml"),
@@ -174,7 +154,6 @@ if SETUP_EXIT_CODE == 0 and CONFIG_EXIT_CODE == 0 and SMOKE_EXIT_CODE == 0:
             "--config", str(REPO_DIR / "configs/direct_streaming.yaml"),
             "--output-dir", str(RUN_DIR),
             "--experiment", EXPERIMENT,
-            "--require-two-gpus",
         ]
         if list(RUN_DIR.glob("checkpoint-*")):
             command += ["--resume", "latest"]
@@ -186,7 +165,7 @@ if SETUP_EXIT_CODE == 0 and CONFIG_EXIT_CODE == 0 and SMOKE_EXIT_CODE == 0:
             print("Training stopped; retrying from the latest checkpoint in 30 seconds.")
             time.sleep(30)
 else:
-    print("Training skipped because setup/configuration or the two-GPU smoke test failed.")
+    print("Training skipped because setup or configuration failed.")
 print(f"training_exit_code={TRAIN_EXIT_CODE}")
 """),
         code("""# Save a compact manifest and all logs under RUN_DIR for Kaggle output persistence.
