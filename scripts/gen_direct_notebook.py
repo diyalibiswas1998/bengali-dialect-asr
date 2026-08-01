@@ -97,7 +97,7 @@ except Exception as exc:
         code("""# Configure this run. Restore a previous checkpoint Dataset between Kaggle sessions.
 PRIOR_RUN_DIR = None  # Example: Path("/kaggle/input/direct-vaani-checkpoints/direct-moe-run")
 EXPERIMENT = "moe"  # baseline, moe, top1, no_dialect, no_shared
-RUN_SMOKE = False
+RUN_SMOKE = True
 MAX_SMOKE_ATTEMPTS = 1
 MAX_TRAIN_ATTEMPTS = 3
 USE_HF_FALLBACK = False
