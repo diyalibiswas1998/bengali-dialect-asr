@@ -235,6 +235,8 @@ def main():
         "speaker_split": f"sha256-{config.seed}-80-10-10-v1",
         "vocab_sha256": hashlib.sha256(vocabulary_bytes).hexdigest(),
         "mapping_version": DIALECT_MAPPING_VERSION,
+        "streaming_layout": "district-safe-v2",
+        "local_config_override": os.environ.get("VAANI_LOCAL_CONFIG", ""),
     }
 
     accelerator = Accelerator(
