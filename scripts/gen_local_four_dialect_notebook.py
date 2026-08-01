@@ -96,9 +96,9 @@ except Exception as exc:
     with (LOG_DIR / "setup.log").open("a", encoding="utf-8") as log:
         log.write(message)
 """),
-        code("""# Configure this session. For a later session, attach the preceding Kaggle output.
-LOCAL_DATASET_DIR = None  # Optional explicit root containing train/validation/test.
+        code("""# Configure this session. Attach the Dataset in Kaggle's Input panel before running.
 ATTACHED_DATASET_SOURCE = "diyalibiswas/vaani-bengali-four-dialect-audio"
+LOCAL_DATASET_DIR = Path("/kaggle/input/vaani-bengali-four-dialect-audio")
 PRIOR_RUN_DIR = None  # Example: Path("/kaggle/input/my-checkpoints/local-four-dialect-run")
 EXPERIMENT = "moe"
 CONFIG_EXIT_CODE = 0
@@ -160,9 +160,18 @@ selection = {
 }
 split_ids = {}
 if data_root is not None and CONFIG_EXIT_CODE == 0:
-    if not is_dataset_root(data_root):
+    if not data_root.is_dir():
         CONFIG_EXIT_CODE = 1
-        print(f"Invalid dataset root: {data_root}")
+        print(
+            f"Attached dataset path is missing: {data_root}. Add "
+            f"{ATTACHED_DATASET_SOURCE} from Kaggle's Input panel."
+        )
+    elif not is_dataset_root(data_root):
+        CONFIG_EXIT_CODE = 1
+        print(
+            f"Invalid dataset root: {data_root}. Expected train/, validation/, "
+            "and test/ containing all 11 district folders."
+        )
     else:
         for split in SPLITS:
             split_dir = data_root / split

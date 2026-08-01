@@ -386,6 +386,7 @@ def test_local_four_dialect_notebook_is_local_only_and_uses_trainer():
     assert 'str(REPO_DIR / "scripts/trainer.py")' in code_text
     assert 'str(REPO_DIR / "configs/local_four_dialect.yaml")' in code_text
     assert "diyalibiswas/vaani-bengali-four-dialect-audio" in code_text
+    assert 'Path("/kaggle/input/vaani-bengali-four-dialect-audio")' in code_text
     assert 'os.environ["VAANI_ALLOW_HF_FALLBACK"] = "0"' in code_text
     assert "smoke_direct_streaming.py" not in code_text
     assert "load_dataset(" not in code_text
