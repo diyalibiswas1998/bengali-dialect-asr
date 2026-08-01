@@ -76,21 +76,49 @@ class VaaniStreamingDataset(IterableDataset):
         self.options.epoch = int(epoch)
 
     def _source_streams(self):
+        import os
+        from pathlib import Path
         from datasets import Audio, load_dataset
 
         configs = list(VAANI_DISTRICT_CONFIGS)
         offset = self.options.epoch % len(configs)
         configs = configs[offset:] + configs[:offset]
         worker = get_worker_info()
+
+        cache_dir = os.environ.get("VAANI_PARQUET_CACHE", "")
+        if not cache_dir and os.path.exists("/kaggle/input"):
+            parquets = list(Path("/kaggle/input").rglob("*.parquet"))
+            if parquets:
+                top_dir = parquets[0]
+                while top_dir.parent != Path("/kaggle/input") and top_dir.parent != Path("/"):
+                    top_dir = top_dir.parent
+                cache_dir = str(top_dir)
+
         for config_index, config in enumerate(configs):
-            dataset = load_dataset(
-                "ARTPARK-IISc/Vaani",
-                config,
-                split="train",
-                streaming=True,
-                token=self.options.token,
-                revision=self.options.revision,
-            )
+            dataset = None
+            if cache_dir and os.path.exists(cache_dir):
+                district_name = config.replace("WestBengal_", "")
+                matching = [str(p) for p in Path(cache_dir).rglob("*.parquet") if district_name.lower() in str(p).lower()]
+                if not matching and config_index == 0:
+                    matching = [str(p) for p in Path(cache_dir).rglob("*.parquet")]
+                if matching:
+                    try:
+                        print(f"[VaaniDataset] Loading {len(matching)} local Parquet files for {config} from {cache_dir}", flush=True)
+                        dataset = load_dataset("parquet", data_files=matching, split="train", streaming=True)
+                    except Exception as exc:
+                        print(f"[VaaniDataset] Could not load local Parquet files: {exc}. Falling back to HF stream.", flush=True)
+                        dataset = None
+
+            if dataset is None:
+                dataset = load_dataset(
+                    "ARTPARK-IISc/Vaani",
+                    config,
+                    split="train",
+                    streaming=True,
+                    token=self.options.token,
+                    revision=self.options.revision,
+                )
+
             if dataset.column_names:
                 selected_columns = [name for name in dataset.column_names if name in STREAM_COLUMNS]
                 if "audio" not in selected_columns:

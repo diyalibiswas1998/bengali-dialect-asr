@@ -122,19 +122,22 @@ if PRIOR_RUN_DIR:
 
 print(f"experiment={EXPERIMENT} output={RUN_DIR}")
 """),
-        code("""# Detect locally attached Kaggle Dataset (diyalibiswas/vaani-westbengal-parquet).
-import glob
+        code("""# Detect locally attached Kaggle Dataset automatically under /kaggle/input.
+import os
+from pathlib import Path
 
-KAGGLE_INPUT_DIR = Path("/kaggle/input/vaani-westbengal-parquet")
-LOCAL_DATA_DIR = RUN_DIR / "vaani_parquet"
+attached_parquets = list(Path("/kaggle/input").rglob("*.parquet")) if Path("/kaggle/input").exists() else []
 
-if KAGGLE_INPUT_DIR.exists():
-    parquet_files = list(KAGGLE_INPUT_DIR.rglob("*.parquet"))
-    print(f"Found {len(parquet_files)} cached parquet files in attached dataset!")
-    os.environ["VAANI_PARQUET_CACHE"] = str(KAGGLE_INPUT_DIR)
-    print(f"VAANI_PARQUET_CACHE={os.environ['VAANI_PARQUET_CACHE']}")
+if attached_parquets:
+    target_dir = attached_parquets[0]
+    while target_dir.parent != Path("/kaggle/input") and target_dir.parent != Path("/"):
+        target_dir = target_dir.parent
+    os.environ["VAANI_PARQUET_CACHE"] = str(target_dir)
+    print(f"Found {len(attached_parquets)} local Parquet files in attached dataset at: {target_dir}")
+    print("Training will load these local Parquet files directly from Kaggle input disk!")
 else:
-    print("No attached dataset found — will stream directly from Hugging Face.")
+    print("No attached local Parquet dataset found in /kaggle/input.")
+    print("Training will stream missing data directly from Hugging Face.")
 """),
         code("""# Smoke test cell (Bypassed by user request - RUN_SMOKE=False)
 SMOKE_EXIT_CODE = 0
