@@ -12,12 +12,25 @@ def code(text):
     return {"cell_type": "code", "execution_count": None, "metadata": {}, "outputs": [], "source": text.splitlines(keepends=True)}
 
 
+KAGGLE_DATASET_SOURCE = "diyalibiswas/vaani-westbengal-parquet"
+
 notebook = {
     "nbformat": 4,
     "nbformat_minor": 5,
     "metadata": {
         "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
-        "kaggle": {"accelerator": "gpu", "isInternetEnabled": True, "isGpuEnabled": True},
+        "kaggle": {
+            "accelerator": "gpu",
+            "isInternetEnabled": True,
+            "isGpuEnabled": True,
+            "dataSources": [
+                {
+                    "sourceType": "datasetVersion",
+                    "sourceId": KAGGLE_DATASET_SOURCE,
+                    "datasetId": KAGGLE_DATASET_SOURCE,
+                }
+            ],
+        },
     },
     "cells": [
         markdown("""# Direct original-Vaani MMS-300M dialect MoE training
@@ -117,6 +130,25 @@ if PRIOR_RUN_DIR:
             setup_log.write(config_message)
 
 print(f"experiment={EXPERIMENT} output={RUN_DIR}")
+"""),
+        code("""# Detect locally attached Kaggle Dataset (diyalibiswas/vaani-westbengal-parquet).
+# If found, copy to working dir so train_direct_streaming.py can use cached parquet files
+# instead of re-streaming everything from Hugging Face.
+import glob
+
+KAGGLE_INPUT_DIR = Path("/kaggle/input/vaani-westbengal-parquet")
+LOCAL_DATA_DIR = RUN_DIR / "vaani_parquet"
+
+if KAGGLE_INPUT_DIR.exists():
+    parquet_files = list(KAGGLE_INPUT_DIR.rglob("*.parquet"))
+    print(f"Found {len(parquet_files)} cached parquet files in attached dataset!")
+    print(f"These cover Alipurduar district (27 shards). Streaming will be used for the remaining 10 districts.")
+    # Expose the cached data directory so the trainer can skip re-downloading those shards.
+    os.environ["VAANI_PARQUET_CACHE"] = str(KAGGLE_INPUT_DIR)
+    print(f"VAANI_PARQUET_CACHE={os.environ['VAANI_PARQUET_CACHE']}")
+else:
+    print("No attached dataset found — will stream all 11 districts directly from Hugging Face.")
+    print("To speed up future runs, attach: diyalibiswas/vaani-westbengal-parquet")
 """),
         code("""# Verify original-stream access plus one forward/backward on both T4 GPUs.
 SMOKE_EXIT_CODE = None
