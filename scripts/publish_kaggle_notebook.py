@@ -18,6 +18,7 @@ def main():
         "--notebook", choices=("creator", "training", "direct", "local-four"), required=True
     )
     parser.add_argument("--processed-dataset", default=None, help="owner/slug; required for training")
+    parser.add_argument("--dataset-source", default=None, help="owner/slug to attach to any notebook")
     args = parser.parse_args()
     kaggle_executable = shutil.which("kaggle")
     if kaggle_executable:
@@ -28,6 +29,7 @@ def main():
         raise RuntimeError("Install the Kaggle CLI and configure ~/.kaggle/kaggle.json first")
     if args.notebook == "training" and not args.processed_dataset:
         raise ValueError("--processed-dataset owner/slug is required for the training notebook")
+    dataset_source = args.dataset_source or args.processed_dataset
 
     repository = Path(__file__).resolve().parents[1]
     code_files = {
@@ -53,7 +55,7 @@ def main():
         "is_private": True,
         "enable_gpu": args.notebook in {"training", "direct", "local-four"},
         "enable_internet": True,
-        "dataset_sources": [args.processed_dataset] if args.processed_dataset else [],
+        "dataset_sources": [dataset_source] if dataset_source else [],
         "competition_sources": [],
         "kernel_sources": [],
     }

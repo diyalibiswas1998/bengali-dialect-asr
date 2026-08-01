@@ -29,7 +29,7 @@ notebook = {
     "cells": [
         markdown("""# Local four-dialect Bengali MMS-300M MoE training
 
-This notebook trains only on the attached Kaggle `train`, `validation`, and `test` WAV/TXT folders. It selects exactly 11 West Bengal districts and assigns them to Kamrupi, Jharkhandi, Varendri, and Rarhi. Dataset network fallback is disabled and no Hugging Face token is read. Internet is used only to clone the code and download the public MMS-300M model if it is not already cached.
+This notebook trains only on the attached private Kaggle Dataset `diyalibiswas/vaani-bengali-four-dialect-audio`, using its `train`, `validation`, and `test` WAV/TXT folders. It selects exactly 11 West Bengal districts and assigns them to Kamrupi, Jharkhandi, Varendri, and Rarhi. Dataset network fallback is disabled and no Hugging Face token is read. Internet is used only to clone the code and download the public MMS-300M model if it is not already cached.
 
 The three training phases each stop at exactly 1,000 optimizer steps. Progress is printed and saved every 200 phase steps; resumable checkpoints are written every 100 optimizer steps and at phase boundaries. This notebook intentionally performs no preliminary test run.
 """),
@@ -98,6 +98,7 @@ except Exception as exc:
 """),
         code("""# Configure this session. For a later session, attach the preceding Kaggle output.
 LOCAL_DATASET_DIR = None  # Optional explicit root containing train/validation/test.
+ATTACHED_DATASET_SOURCE = "diyalibiswas/vaani-bengali-four-dialect-audio"
 PRIOR_RUN_DIR = None  # Example: Path("/kaggle/input/my-checkpoints/local-four-dialect-run")
 EXPERIMENT = "moe"
 CONFIG_EXIT_CODE = 0
@@ -139,13 +140,24 @@ def is_dataset_root(path):
 
 candidates = sorted({path.parent for path in input_root.rglob("train") if path.is_dir() and is_dataset_root(path.parent)})
 data_root = Path(LOCAL_DATASET_DIR) if LOCAL_DATASET_DIR else None
-if data_root is None and len(candidates) == 1:
+expected_slug = ATTACHED_DATASET_SOURCE.rsplit("/", 1)[-1].lower()
+preferred_candidates = [path for path in candidates if expected_slug in str(path).lower()]
+if data_root is None and len(preferred_candidates) == 1:
+    data_root = preferred_candidates[0]
+elif data_root is None and len(candidates) == 1:
     data_root = candidates[0]
 elif data_root is None:
     CONFIG_EXIT_CODE = 1
-    print(f"Expected exactly one attached dataset root; found {len(candidates)}: {candidates}")
+    print(
+        f"Could not uniquely locate {ATTACHED_DATASET_SOURCE}; "
+        f"found {len(candidates)} valid roots: {candidates}"
+    )
 
-selection = {"district_to_dialect": DISTRICT_TO_DIALECT, "splits": {}}
+selection = {
+    "kaggle_dataset_source": ATTACHED_DATASET_SOURCE,
+    "district_to_dialect": DISTRICT_TO_DIALECT,
+    "splits": {},
+}
 split_ids = {}
 if data_root is not None and CONFIG_EXIT_CODE == 0:
     if not is_dataset_root(data_root):
@@ -236,6 +248,7 @@ manifest = {
     "created_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     "repository_commit": repo_commit,
     "experiment": EXPERIMENT,
+    "kaggle_dataset_source": ATTACHED_DATASET_SOURCE,
     "dataset_mode": "attached-local-wav-txt-only",
     "selected_districts": list(DISTRICT_TO_DIALECT),
     "dialects": sorted(set(DISTRICT_TO_DIALECT.values())),
