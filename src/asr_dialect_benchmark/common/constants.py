@@ -3,8 +3,8 @@
 DIALECT_GROUPS = [
     "Rarhi",
     "Varendri",
-    "Rajbanshi/Kamrupi",
-    "Manbhumi/Jharkhandi",
+    "Jharkhandi",
+    "Kamrupi",
 ]
 DIALECTS = DIALECT_GROUPS  # Backwards-compatible public name.
 DIALECT_TO_IDX = {name: index for index, name in enumerate(DIALECT_GROUPS)}
@@ -14,17 +14,17 @@ DISTRICT_TO_DIALECT = {
     "North24Parganas": "Rarhi",
     "Malda": "Varendri",
     "DakshinDinajpur": "Varendri",
-    "Alipurduar": "Rajbanshi/Kamrupi",
-    "CoochBehar": "Rajbanshi/Kamrupi",
-    "Jalpaiguri": "Rajbanshi/Kamrupi",
-    "Darjeeling": "Rajbanshi/Kamrupi",
-    "Jhargram": "Manbhumi/Jharkhandi",
-    "PaschimMedinipur": "Manbhumi/Jharkhandi",
-    "Purulia": "Manbhumi/Jharkhandi",
+    "Alipurduar": "Kamrupi",
+    "CoochBehar": "Kamrupi",
+    "Jalpaiguri": "Kamrupi",
+    "Darjeeling": "Kamrupi",
+    "Jhargram": "Jharkhandi",
+    "PaschimMedinipur": "Jharkhandi",
+    "Purulia": "Jharkhandi",
 }
 
 BOUNDARY_DISTRICTS = ("Darjeeling", "North24Parganas")
-DIALECT_MAPPING_VERSION = "west-bengal-proxy-v1"
+DIALECT_MAPPING_VERSION = "west-bengal-four-dialect-proxy-v2"
 DIALECT_MAPPING_REFERENCE = (
     "https://ruralindiaonline.org/te/library/resource/"
     "linguistic-survey-of-india---west-bengal-part-i/"

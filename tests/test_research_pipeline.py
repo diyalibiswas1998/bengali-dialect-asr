@@ -41,7 +41,10 @@ from asr_dialect_benchmark.tokenization.simple_tokenizer import SimpleTokenizer,
 
 def test_mapping_and_schema_are_versioned_interface():
     assert len(DIALECT_TO_IDX) == 4
+    assert set(DIALECT_TO_IDX) == {"Rarhi", "Varendri", "Jharkhandi", "Kamrupi"}
     assert len(DISTRICT_TO_DIALECT) == 11
+    assert DISTRICT_TO_DIALECT["Alipurduar"] == "Kamrupi"
+    assert DISTRICT_TO_DIALECT["PaschimMedinipur"] == "Jharkhandi"
     assert normalize_district("North 24 Parganas(20)") == "North24Parganas"
     assert SCHEMA.names == [
         "sample_id", "audio_flac", "duration", "transcript", "speaker_id",
@@ -265,6 +268,40 @@ def test_local_only_mode_fails_without_local_files_instead_of_requesting_token(m
     )
     with pytest.raises(RuntimeError, match="fallback is disabled"):
         next(dataset._source_streams())
+
+
+def test_paired_audio_loader_uses_only_allowlist_and_supplied_split(tmp_path, monkeypatch):
+    split_dir = tmp_path / "train"
+    for district in DISTRICT_TO_DIALECT:
+        district_dir = split_dir / district
+        district_dir.mkdir(parents=True)
+        (district_dir / f"{district}_sample.wav").write_bytes(b"synthetic")
+        (district_dir / f"{district}_sample.txt").write_text("বাংলা কথা", encoding="utf-8")
+    unrelated = split_dir / "Bangalore"
+    unrelated.mkdir()
+    (unrelated / "ignored.wav").write_bytes(b"synthetic")
+    (unrelated / "ignored.txt").write_text("বাংলা", encoding="utf-8")
+
+    dataset = VaaniStreamingDataset(
+        StreamingOptions(
+            split="train", token="", revision="local", allow_hf_fallback=False
+        ),
+        fixed_bengali_tokenizer(),
+    )
+    rows = list(dataset._paired_audio_rows(tmp_path, worker=None))
+    assert len(rows) == 11
+    assert {row["district"] for row in rows} == set(DISTRICT_TO_DIALECT)
+    assert all(row["_preassigned_split"] == "train" for row in rows)
+    assert all(row["_dialect_from_district"] for row in rows)
+
+    monkeypatch.setattr(
+        "asr_dialect_benchmark.data.streaming_vaani._decode_audio",
+        lambda _value: (np.zeros(16_000, dtype=np.float32), 16_000),
+    )
+    prepared = [dataset._prepare(row, "") for row in rows]
+    assert all(sample is not None for sample in prepared)
+    assert {sample["dialect_group"] for sample in prepared} == set(DIALECT_TO_IDX)
+    assert all(sample["dialect_label_mask"].item() for sample in prepared)
 
 
 def test_direct_notebook_saves_manifest_when_setup_fails(tmp_path):

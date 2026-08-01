@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import random
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -94,6 +95,61 @@ class VaaniStreamingDataset(IterableDataset):
     def set_epoch(self, epoch: int) -> None:
         self.options.epoch = int(epoch)
 
+    def _paired_audio_rows(self, root: Path, worker) -> Iterator[Mapping]:
+        """Yield only the 11 approved district folders from a supplied split."""
+        split_dir = root / self.options.split
+        if not split_dir.is_dir():
+            raise RuntimeError(f"Missing local split directory: {split_dir}")
+
+        entries = []
+        counts = {}
+        pair_errors = []
+        for district in DISTRICT_TO_DIALECT:
+            district_dir = split_dir / district
+            if not district_dir.is_dir():
+                raise RuntimeError(f"Missing required district directory: {district_dir}")
+            wav_paths = sorted(district_dir.rglob("*.wav"))
+            txt_paths = sorted(district_dir.rglob("*.txt"))
+            wav_by_stem = {path.relative_to(district_dir).with_suffix(""): path for path in wav_paths}
+            txt_by_stem = {path.relative_to(district_dir).with_suffix(""): path for path in txt_paths}
+            missing_text = sorted(set(wav_by_stem) - set(txt_by_stem))
+            missing_audio = sorted(set(txt_by_stem) - set(wav_by_stem))
+            if missing_text or missing_audio:
+                pair_errors.append(
+                    f"{district}: missing_text={len(missing_text)} missing_audio={len(missing_audio)}"
+                )
+                continue
+            counts[district] = len(wav_by_stem)
+            entries.extend(
+                (district, wav_by_stem[stem], txt_by_stem[stem]) for stem in wav_by_stem
+            )
+        if pair_errors:
+            raise RuntimeError("Invalid WAV/TXT pairs: " + "; ".join(pair_errors))
+        if not entries:
+            raise RuntimeError(f"No paired WAV/TXT samples found below {split_dir}")
+
+        random.Random(self.options.seed + self.options.epoch * 1009).shuffle(entries)
+        print(
+            f"[VaaniDataset] local_split={self.options.split} samples={len(entries)} "
+            f"district_counts={counts}",
+            flush=True,
+        )
+        for index, (district, wav_path, txt_path) in enumerate(entries):
+            if worker is not None and index % worker.num_workers != worker.id:
+                continue
+            transcript = txt_path.read_text(encoding="utf-8-sig")
+            yield {
+                "audio": {"path": str(wav_path)},
+                "transcript": transcript,
+                "language": "Bengali",
+                "speakerID": wav_path.stem,
+                "district": district,
+                "residence_district": district,
+                "sample_id": wav_path.stem,
+                "_preassigned_split": self.options.split,
+                "_dialect_from_district": True,
+            }
+
     def _source_streams(self):
         import os
         from datasets import Audio, load_dataset
@@ -102,6 +158,14 @@ class VaaniStreamingDataset(IterableDataset):
         offset = self.options.epoch % len(configs)
         configs = configs[offset:] + configs[:offset]
         worker = get_worker_info()
+
+        audio_root = os.environ.get("VAANI_AUDIO_ROOT", "").strip()
+        if audio_root:
+            root = Path(audio_root)
+            if not root.is_dir():
+                raise RuntimeError(f"VAANI_AUDIO_ROOT does not exist: {root}")
+            yield "", self._paired_audio_rows(root, worker)
+            return
 
         cache_dir = os.environ.get("VAANI_PARQUET_CACHE", "")
         if cache_dir and not os.path.isdir(cache_dir):
@@ -197,7 +261,13 @@ class VaaniStreamingDataset(IterableDataset):
         if not is_bengali_language(language):
             return None
         speaker_id = str(_first(row, ("speakerID", "speakerId", "speaker_id", "speaker"))).strip()
-        if not speaker_id or speaker_split(speaker_id, self.options.seed) != self.options.split:
+        preassigned_split = str(row.get("_preassigned_split", "")).strip()
+        if not speaker_id:
+            return None
+        if preassigned_split:
+            if preassigned_split != self.options.split:
+                return None
+        elif speaker_split(speaker_id, self.options.seed) != self.options.split:
             return None
         source_district = normalize_district(
             _first(row, ("district", "source_district", "districtName"))
@@ -220,7 +290,8 @@ class VaaniStreamingDataset(IterableDataset):
         minimum_ctc_frames = len(target) + sum(left == right for left, right in zip(target, target[1:]))
         if not target or wav2vec2_output_frames(len(audio)) < minimum_ctc_frames:
             return None
-        group = DISTRICT_TO_DIALECT.get(residence_district, "")
+        label_district = source_district if row.get("_dialect_from_district") else residence_district
+        group = DISTRICT_TO_DIALECT.get(label_district, "")
         label = DIALECT_TO_IDX[group] if group else -100
         source_id = str(_first(row, ("sample_id", "id", "utterance_id", "audio_id"), ""))
         if not source_id:

@@ -240,6 +240,8 @@ def main():
         "streaming_layout": "district-safe-v2",
         "local_config_override": os.environ.get("VAANI_LOCAL_CONFIG", ""),
         "allow_hf_fallback": os.environ.get("VAANI_ALLOW_HF_FALLBACK", "1"),
+        "local_data_mode": "paired-wav-txt-v1" if os.environ.get("VAANI_AUDIO_ROOT") else "parquet-or-hf",
+        "split_policy": "supplied-directories" if os.environ.get("VAANI_AUDIO_ROOT") else "speaker-hash-v1",
     }
 
     accelerator = Accelerator(

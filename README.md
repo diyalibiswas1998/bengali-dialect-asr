@@ -1,8 +1,10 @@
 # Bengali Dialect ASR: MMS-300M + Sparse MoE
 
-This repository implements a reproducible comparison between an MMS-300M Bengali CTC baseline and a four-expert dialect-aware MoE. It trains from a local, validated Vaani derivative rather than downloading the raw corpus during every epoch.
+This repository implements a reproducible comparison between an MMS-300M Bengali CTC baseline and a four-expert dialect-aware MoE. It supports both a validated Parquet derivative and direct paired WAV/TXT folders attached locally on Kaggle.
 
 The dialect labels are **provisional geographic proxies**, not linguistic ground truth. The versioned mapping is in `src/asr_dialect_benchmark/common/constants.py`; Darjeeling and North 24 Parganas are treated as boundary cases in evaluation.
+
+The maintained four-class mapping is: Rarhi (Kolkata, North24Parganas), Varendri (Malda, DakshinDinajpur), Jharkhandi (Jhargram, PaschimMedinipur, Purulia), and Kamrupi (Alipurduar, CoochBehar, Darjeeling, Jalpaiguri).
 
 ## 1. Build the processed corpus once
 
@@ -42,7 +44,7 @@ accelerate launch --config_file configs/accelerate_t4x2.yaml \
 
 To publish either maintained notebook through the Kaggle API, configure the Kaggle CLI and run `python scripts/publish_kaggle_notebook.py --username YOUR_USER --notebook creator`; after the processed Dataset exists, publish training with `--notebook training --processed-dataset OWNER/SLUG`. Kernel pushes are private and start a Kaggle execution.
 
-To bypass the derived dataset entirely, use `kaggle_direct_vaani_training.ipynb` or publish it with `python scripts/publish_kaggle_notebook.py --username YOUR_USER --notebook direct`. This streams the pinned original 11-district Vaani source on every pass. It preserves the decoded waveform until the mandatory mono/16 kHz MMS conversion, but gives up globally stratified splits, storage-local training, and efficient exact mid-pass resume.
+To train directly from the uploaded paired files, use `kaggle_direct_vaani_training.ipynb` or publish it with `python scripts/publish_kaggle_notebook.py --username YOUR_USER --notebook direct`. The attached Dataset must contain `train/`, `validation/`, and `test/`, each with the same 11 district folders and paired `.wav`/`.txt` files. The loader ignores every other district, preserves the supplied splits, globally shuffles the selected training rows, and derives the four dialect proxy labels from the district folder. It uses local-only mode by default and needs no Vaani Hugging Face token.
 
 Omit `--resume` for the first session. Preserve `/kaggle/working/moe-run` as a private Kaggle Dataset version between sessions, restore it before the next run, and then use `--resume latest`.
 

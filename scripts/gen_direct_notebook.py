@@ -28,7 +28,7 @@ notebook = {
 
 This notebook reads the attached original Vaani Parquet files directly during every pass. It does **not** write a derived audio dataset and defaults to local-only mode, so no Hugging Face token is needed. Audio is decoded in memory, mixed to mono when necessary, and resampled to 16 kHz only because MMS requires 16 kHz input.
 
-Trade-offs: the stable speaker-hash split is globally disjoint but not globally stratified; a mid-pass resume replays and skips earlier local rows; and three full passes can exceed several Kaggle sessions.
+Trade-offs: the supplied train/validation/test folders are preserved as-is; without true speaker metadata they cannot prove speaker-disjointness. A mid-pass resume replays and skips earlier local rows, and three full passes can exceed several Kaggle sessions.
 """),
         code("""import os, shutil, subprocess, sys, time
 from pathlib import Path
@@ -130,14 +130,106 @@ if PRIOR_RUN_DIR:
 
 print(f"experiment={EXPERIMENT} output={RUN_DIR}")
 """),
-        code("""# Select the attached Vaani Parquet Dataset without mixing unrelated inputs.
+        code("""# Select the attached Vaani WAV/TXT split dataset (Parquet remains supported).
 from collections import Counter
+import json
 import os
 from pathlib import Path
 
-LOCAL_DATASET_DIR = None  # Set explicitly only if more than one candidate is listed below.
+LOCAL_DATASET_DIR = None  # Root containing train/validation/test; auto-detected when unique.
 LOCAL_CONFIG_OVERRIDE = None  # Example: "WestBengal_Kolkata" only for a flat single-district cache.
 input_root = Path("/kaggle/input")
+allowed_districts = (
+    "Alipurduar", "CoochBehar", "Darjeeling", "Jalpaiguri",
+    "Jhargram", "PaschimMedinipur", "Purulia",
+    "Malda", "DakshinDinajpur", "North24Parganas", "Kolkata",
+)
+
+audio_candidates = []
+if input_root.exists():
+    for train_dir in input_root.rglob("train"):
+        root = train_dir.parent
+        if train_dir.is_dir() and all((root / split).is_dir() for split in ("train", "validation", "test")):
+            if all((root / "train" / district).is_dir() for district in allowed_districts):
+                audio_candidates.append(root)
+audio_candidates = sorted(set(audio_candidates))
+audio_root = Path(LOCAL_DATASET_DIR) if LOCAL_DATASET_DIR else None
+if audio_root is None and len(audio_candidates) == 1:
+    audio_root = audio_candidates[0]
+elif audio_root is None and len(audio_candidates) > 1:
+    vaani_audio = [path for path in audio_candidates if "vaani" in str(path).lower()]
+    if len(vaani_audio) == 1:
+        audio_root = vaani_audio[0]
+    else:
+        CONFIG_EXIT_CODE = 1
+        print("Multiple WAV/TXT split roots found; set LOCAL_DATASET_DIR explicitly:")
+        for candidate in audio_candidates:
+            print(f"  {candidate}")
+
+if audio_root is not None and CONFIG_EXIT_CODE == 0:
+    split_summary = {}
+    split_ids = {}
+    for split in ("train", "validation", "test"):
+        split_dir = audio_root / split
+        missing = [district for district in allowed_districts if not (split_dir / district).is_dir()]
+        if missing:
+            CONFIG_EXIT_CODE = 1
+            print(f"{split} is missing required districts: {missing}")
+            continue
+        ignored = sorted(path.name for path in split_dir.iterdir() if path.is_dir() and path.name not in allowed_districts)
+        district_counts = {}
+        split_sample_ids = set()
+        pair_errors = []
+        txt_count = 0
+        for district in allowed_districts:
+            district_dir = split_dir / district
+            wav_ids = {path.relative_to(district_dir).with_suffix("") for path in district_dir.rglob("*.wav")}
+            txt_ids = {path.relative_to(district_dir).with_suffix("") for path in district_dir.rglob("*.txt")}
+            if wav_ids != txt_ids:
+                pair_errors.append(
+                    f"{district}: wav_only={len(wav_ids - txt_ids)} txt_only={len(txt_ids - wav_ids)}"
+                )
+            district_counts[district] = len(wav_ids)
+            txt_count += len(txt_ids)
+            split_sample_ids.update(f"{district}/{sample_id}" for sample_id in wav_ids)
+        if pair_errors:
+            CONFIG_EXIT_CODE = 1
+            print(f"{split} pair errors: {pair_errors}")
+        split_ids[split] = split_sample_ids
+        wav_count = sum(district_counts.values())
+        split_summary[split] = {"samples": wav_count, "district_counts": district_counts, "ignored": ignored}
+        print(f"{split}: selected={wav_count} WAV/{txt_count} TXT; ignored_districts={ignored}")
+    split_overlaps = {
+        "train_validation": len(split_ids.get("train", set()) & split_ids.get("validation", set())),
+        "train_test": len(split_ids.get("train", set()) & split_ids.get("test", set())),
+        "validation_test": len(split_ids.get("validation", set()) & split_ids.get("test", set())),
+    }
+    if any(split_overlaps.values()):
+        CONFIG_EXIT_CODE = 1
+        print(f"Sample-ID overlap across supplied splits: {split_overlaps}")
+    if CONFIG_EXIT_CODE == 0:
+        os.environ["VAANI_AUDIO_ROOT"] = str(audio_root)
+        os.environ.pop("VAANI_PARQUET_CACHE", None)
+        os.environ.pop("VAANI_LOCAL_CONFIG", None)
+        selection_manifest = {
+            "root": str(audio_root),
+            "allowed_districts": list(allowed_districts),
+            "district_to_dialect": {
+                "Alipurduar": "Kamrupi", "CoochBehar": "Kamrupi",
+                "Darjeeling": "Kamrupi", "Jalpaiguri": "Kamrupi",
+                "Jhargram": "Jharkhandi", "PaschimMedinipur": "Jharkhandi",
+                "Purulia": "Jharkhandi", "Malda": "Varendri",
+                "DakshinDinajpur": "Varendri", "North24Parganas": "Rarhi",
+                "Kolkata": "Rarhi",
+            },
+            "splits": split_summary,
+            "split_sample_id_overlap": split_overlaps,
+        }
+        (RUN_DIR / "dataset_selection.json").write_text(
+            json.dumps(selection_manifest, indent=2), encoding="utf-8"
+        )
+        print(f"Selected paired-audio dataset root: {audio_root}")
+
 attached_parquets = sorted(input_root.rglob("*.parquet")) if input_root.exists() else []
 
 def kaggle_dataset_root(path):
@@ -151,12 +243,12 @@ def kaggle_dataset_root(path):
 
 candidate_counts = Counter(kaggle_dataset_root(path) for path in attached_parquets)
 vaani_candidates = [path for path in candidate_counts if "vaani" in str(path).lower()]
-target_dir = Path(LOCAL_DATASET_DIR) if LOCAL_DATASET_DIR else None
-if target_dir is None and len(vaani_candidates) == 1:
+target_dir = None
+if audio_root is None and len(vaani_candidates) == 1:
     target_dir = vaani_candidates[0]
-elif target_dir is None and len(candidate_counts) == 1:
+elif audio_root is None and len(candidate_counts) == 1:
     target_dir = next(iter(candidate_counts))
-elif target_dir is None and candidate_counts:
+elif audio_root is None and candidate_counts:
     CONFIG_EXIT_CODE = 1
     config_message = "Multiple Parquet Datasets are attached; set LOCAL_DATASET_DIR explicitly.\\n"
     print(config_message, end="")
@@ -165,7 +257,7 @@ elif target_dir is None and candidate_counts:
     with (LOG_DIR / "setup.log").open("a", encoding="utf-8") as setup_log:
         setup_log.write(config_message)
 
-if target_dir is not None:
+if audio_root is None and target_dir is not None:
     local_parquets = sorted(target_dir.rglob("*.parquet"))
     if not local_parquets:
         CONFIG_EXIT_CODE = 1
@@ -177,13 +269,13 @@ if target_dir is not None:
         else:
             os.environ.pop("VAANI_LOCAL_CONFIG", None)
         print(f"Selected local Vaani cache: {target_dir} ({len(local_parquets)} Parquet files)")
-else:
-    print("No attached local Parquet dataset found in /kaggle/input.")
+elif audio_root is None:
+    print("No attached local WAV/TXT or Parquet dataset found in /kaggle/input.")
     if USE_HF_FALLBACK:
         print("Training will stream missing data directly from Hugging Face.")
     else:
         CONFIG_EXIT_CODE = 1
-        config_message = "Attach the local Vaani Parquet Dataset; HF fallback is disabled.\\n"
+        config_message = "Attach the local Vaani dataset; HF fallback is disabled.\\n"
         print(config_message, end="")
         with (LOG_DIR / "setup.log").open("a", encoding="utf-8") as setup_log:
             setup_log.write(config_message)
@@ -270,6 +362,7 @@ manifest = {
     "complete": final_checkpoint.exists(),
     "checkpoints": checkpoint_summary,
     "logs": [path.name for path in sorted(LOG_DIR.glob("*.log"))],
+    "dataset_selection_manifest": "dataset_selection.json" if (RUN_DIR / "dataset_selection.json").exists() else None,
 }
 (RUN_DIR / "artifact_manifest.json").write_text(
     json.dumps(manifest, indent=2), encoding="utf-8"
