@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
-from typing import Dict, Iterator, Mapping, Optional
+from pathlib import Path
+from typing import Dict, Iterator, Mapping, Optional, Sequence
 
 import torch
 from torch.utils.data import IterableDataset, get_worker_info
@@ -28,6 +30,24 @@ STREAM_COLUMNS = {
     "residence_district", "residenceDistrict", "stay", "residence",
     "sample_id", "id", "utterance_id", "audio_id",
 }
+
+
+def local_parquets_by_config(paths: Sequence[Path]) -> Dict[str, list[Path]]:
+    """Match district-labelled paths without assigning flat caches to Kolkata."""
+    normalized_paths = {
+        path: re.sub(r"[^a-z0-9]", "", str(path).lower()) for path in paths
+    }
+    matches = {}
+    for config in VAANI_DISTRICT_CONFIGS:
+        district_key = re.sub(
+            r"[^a-z0-9]", "", config.removeprefix("WestBengal_").lower()
+        )
+        config_matches = [
+            path for path, normalized in normalized_paths.items() if district_key in normalized
+        ]
+        if config_matches:
+            matches[config] = sorted(config_matches)
+    return matches
 
 
 def fixed_bengali_tokenizer() -> SimpleTokenizer:
@@ -77,7 +97,6 @@ class VaaniStreamingDataset(IterableDataset):
 
     def _source_streams(self):
         import os
-        from pathlib import Path
         from datasets import Audio, load_dataset
 
         configs = list(VAANI_DISTRICT_CONFIGS)
@@ -86,28 +105,70 @@ class VaaniStreamingDataset(IterableDataset):
         worker = get_worker_info()
 
         cache_dir = os.environ.get("VAANI_PARQUET_CACHE", "")
-        if not cache_dir and os.path.exists("/kaggle/input"):
-            parquets = list(Path("/kaggle/input").rglob("*.parquet"))
-            if parquets:
-                top_dir = parquets[0]
-                while top_dir.parent != Path("/kaggle/input") and top_dir.parent != Path("/"):
-                    top_dir = top_dir.parent
-                cache_dir = str(top_dir)
+        if cache_dir and not os.path.isdir(cache_dir):
+            raise RuntimeError(f"VAANI_PARQUET_CACHE does not exist: {cache_dir}")
+
+        local_paths = sorted(Path(cache_dir).rglob("*.parquet")) if cache_dir else []
+        local_by_config = local_parquets_by_config(local_paths)
+        local_override = os.environ.get("VAANI_LOCAL_CONFIG", "").strip()
+        if local_override:
+            if local_override not in VAANI_DISTRICT_CONFIGS:
+                raise RuntimeError(f"Unknown VAANI_LOCAL_CONFIG: {local_override}")
+            local_by_config = {local_override: local_paths}
+
+        def prepare_stream(dataset, shuffle_index):
+            if dataset.column_names:
+                selected_columns = [name for name in dataset.column_names if name in STREAM_COLUMNS]
+                if "audio" not in selected_columns:
+                    raise RuntimeError("Vaani source has no audio column")
+                dataset = dataset.select_columns(selected_columns)
+            dataset = dataset.cast_column("audio", Audio(decode=False))
+            dataset = dataset.shuffle(
+                seed=self.options.seed + self.options.epoch * 1009 + shuffle_index,
+                buffer_size=self.options.shuffle_buffer,
+            )
+            if worker is not None and worker.num_workers > 1:
+                dataset = dataset.shard(num_shards=worker.num_workers, index=worker.id)
+            return dataset
+
+        # A flat cache cannot safely be called Kolkata. Load it once and require
+        # every accepted row to carry its own district metadata.
+        if local_paths and not local_by_config:
+            print(
+                f"[VaaniDataset] Loading {len(local_paths)} consolidated local Parquet files once; "
+                "source_district must be present in each row",
+                flush=True,
+            )
+            dataset = load_dataset(
+                "parquet", data_files=[str(path) for path in local_paths], split="train", streaming=True
+            )
+            district_columns = {"district", "source_district", "districtName"}
+            if dataset.column_names and not district_columns.intersection(dataset.column_names):
+                raise RuntimeError(
+                    "Flat local Parquet cache has no district column. Set VAANI_LOCAL_CONFIG "
+                    "only if every file belongs to one known district."
+                )
+            yield "", prepare_stream(dataset, 0)
+            return
 
         for config_index, config in enumerate(configs):
             dataset = None
-            if cache_dir and os.path.exists(cache_dir):
-                district_name = config.replace("WestBengal_", "")
-                matching = [str(p) for p in Path(cache_dir).rglob("*.parquet") if district_name.lower() in str(p).lower()]
-                if not matching and config_index == 0:
-                    matching = [str(p) for p in Path(cache_dir).rglob("*.parquet")]
-                if matching:
-                    try:
-                        print(f"[VaaniDataset] Loading {len(matching)} local Parquet files for {config} from {cache_dir}", flush=True)
-                        dataset = load_dataset("parquet", data_files=matching, split="train", streaming=True)
-                    except Exception as exc:
-                        print(f"[VaaniDataset] Could not load local Parquet files: {exc}. Falling back to HF stream.", flush=True)
-                        dataset = None
+            matching = local_by_config.get(config, [])
+            if matching:
+                try:
+                    print(
+                        f"[VaaniDataset] Loading {len(matching)} local Parquet files for {config}",
+                        flush=True,
+                    )
+                    dataset = load_dataset(
+                        "parquet", data_files=[str(path) for path in matching], split="train", streaming=True
+                    )
+                except Exception as exc:
+                    print(
+                        f"[VaaniDataset] Could not load local Parquet files: {exc}. Falling back to HF stream.",
+                        flush=True,
+                    )
+                    dataset = None
 
             if dataset is None:
                 dataset = load_dataset(
@@ -119,19 +180,7 @@ class VaaniStreamingDataset(IterableDataset):
                     revision=self.options.revision,
                 )
 
-            if dataset.column_names:
-                selected_columns = [name for name in dataset.column_names if name in STREAM_COLUMNS]
-                if "audio" not in selected_columns:
-                    raise RuntimeError(f"Vaani configuration {config} has no audio column")
-                dataset = dataset.select_columns(selected_columns)
-            dataset = dataset.cast_column("audio", Audio(decode=False))
-            dataset = dataset.shuffle(
-                seed=self.options.seed + self.options.epoch * 1009 + config_index,
-                buffer_size=self.options.shuffle_buffer,
-            )
-            if worker is not None and worker.num_workers > 1:
-                dataset = dataset.shard(num_shards=worker.num_workers, index=worker.id)
-            yield config, dataset
+            yield config, prepare_stream(dataset, config_index)
 
     def _prepare(self, row: Mapping, config: str) -> Optional[Dict]:
         transcript = normalize_bengali_text(_first(row, ("transcript", "transcription", "text", "sentence")))
@@ -196,3 +245,8 @@ class VaaniStreamingDataset(IterableDataset):
                 accepted += 1
                 if self.options.max_samples is not None and accepted >= self.options.max_samples:
                     return
+        if accepted == 0:
+            raise RuntimeError(
+                f"No valid {self.options.split} samples were found. For a flat single-district "
+                "cache set VAANI_LOCAL_CONFIG; consolidated caches must include district metadata."
+            )

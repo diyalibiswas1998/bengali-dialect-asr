@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import time
 from pathlib import Path
 
 import torch
@@ -86,24 +87,48 @@ def latest_checkpoint(output_dir: Path):
 
 def save_checkpoint(accelerator, model, output_dir, name, state, config, tokenizer):
     checkpoint = output_dir / name
+    staging = output_dir / f".{name}.incomplete"
+    if accelerator.is_main_process:
+        if staging.exists():
+            shutil.rmtree(staging)
+        free_gib = shutil.disk_usage(output_dir).free / (1024 ** 3)
+        accelerator.print(
+            f"checkpoint_start name={name} step={state['global_step']} free_disk_gib={free_gib:.2f}",
+            flush=True,
+        )
     accelerator.wait_for_everyone()
-    accelerator.save_state(str(checkpoint))
+    started = time.monotonic()
+    accelerator.save_state(str(staging))
     # Accelerate already stores resumable model weights in every checkpoint.
     # Keep a separate portable state dict only for the final evaluation checkpoint.
     if name == "checkpoint-phase-3":
-        accelerator.save(accelerator.get_state_dict(model), checkpoint / "model_state.pt")
+        accelerator.save(accelerator.get_state_dict(model), staging / "model_state.pt")
     if accelerator.is_main_process:
-        (checkpoint / "trainer_state.json").write_text(json.dumps(state, indent=2), encoding="utf-8")
+        (staging / "trainer_state.json").write_text(json.dumps(state, indent=2), encoding="utf-8")
         clean_config = sanitize(OmegaConf.to_container(config, resolve=True))
-        (checkpoint / "config.json").write_text(json.dumps(clean_config, indent=2), encoding="utf-8")
-        tokenizer.save(checkpoint / "vocab.json")
+        (staging / "config.json").write_text(json.dumps(clean_config, indent=2), encoding="utf-8")
+        tokenizer.save(staging / "vocab.json")
         mapping = {
             "version": DIALECT_MAPPING_VERSION,
             "reference": DIALECT_MAPPING_REFERENCE,
             "district_to_dialect": DISTRICT_TO_DIALECT,
         }
-        (checkpoint / "dialect_mapping.json").write_text(
+        (staging / "dialect_mapping.json").write_text(
             json.dumps(mapping, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        if checkpoint.exists():
+            if checkpoint.parent.resolve() != output_dir.resolve():
+                raise RuntimeError(f"Unsafe checkpoint replacement target: {checkpoint}")
+            shutil.rmtree(checkpoint)
+        staging.replace(checkpoint)
+        checkpoint_bytes = sum(path.stat().st_size for path in checkpoint.rglob("*") if path.is_file())
+        free_gib = shutil.disk_usage(output_dir).free / (1024 ** 3)
+        accelerator.print(
+            f"checkpoint_complete name={name} seconds={time.monotonic() - started:.1f} "
+            f"size_gib={checkpoint_bytes / (1024 ** 3):.2f} free_disk_gib={free_gib:.2f}",
+            flush=True,
         )
     accelerator.wait_for_everyone()
 

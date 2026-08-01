@@ -1,7 +1,9 @@
 from collections import Counter, defaultdict
 import hashlib
 import json
+import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import time
@@ -27,6 +29,7 @@ from asr_dialect_benchmark.data.streaming_vaani import (
     StreamingOptions,
     VaaniStreamingDataset,
     fixed_bengali_tokenizer,
+    local_parquets_by_config,
     speaker_split,
 )
 from asr_dialect_benchmark.training.sampler import LengthBucketBatchSampler
@@ -257,6 +260,7 @@ def test_direct_notebook_saves_manifest_when_setup_fails(tmp_path):
     (log_dir / "setup.log").write_text("synthetic secret failure\n", encoding="utf-8")
     namespace = {
         "Path": Path,
+        "os": os,
         "shutil": shutil,
         "subprocess": subprocess,
         "time": time,
@@ -267,14 +271,35 @@ def test_direct_notebook_saves_manifest_when_setup_fails(tmp_path):
         "run_logged": lambda *_args, **_kwargs: 1,
     }
 
-    for cell_index in (2, 3, 4):
-        source = "".join(notebook["cells"][cell_index]["source"])
-        exec(compile(source, f"notebook-cell-{cell_index}", "exec"), namespace)
-    final_source = "".join(notebook["cells"][5]["source"])
+    cells = {cell["id"]: cell for cell in notebook["cells"]}
+    for cell_id in ("direct-02", "direct-03", "direct-04", "direct-05"):
+        source = "".join(cells[cell_id]["source"])
+        exec(compile(source, f"notebook-{cell_id}", "exec"), namespace)
+    final_source = "".join(cells["direct-06"]["source"])
     with pytest.raises(RuntimeError, match="Setup failed"):
-        exec(compile(final_source, "notebook-cell-5", "exec"), namespace)
+        exec(compile(final_source, "notebook-direct-06", "exec"), namespace)
 
     manifest = json.loads((run_dir / "artifact_manifest.json").read_text(encoding="utf-8"))
     assert manifest["setup_exit_code"] == 1
     assert manifest["training_exit_code"] is None
     assert manifest["logs"] == ["setup.log"]
+
+
+def test_local_parquet_matching_never_assigns_flat_cache_to_kolkata(tmp_path):
+    flat = [tmp_path / "train-00000.parquet", tmp_path / "train-00001.parquet"]
+    assert local_parquets_by_config(flat) == {}
+
+    district_paths = [
+        tmp_path / "Kolkata" / "train-00000.parquet",
+        tmp_path / "Dakshin-Dinajpur" / "train-00000.parquet",
+    ]
+    matches = local_parquets_by_config(district_paths)
+    assert matches["WestBengal_Kolkata"] == [district_paths[0]]
+    assert matches["WestBengal_DakshinDinajpur"] == [district_paths[1]]
+
+
+def test_generated_notebook_contains_no_hardcoded_huggingface_token():
+    root = Path(__file__).resolve().parents[1]
+    text = (root / "scripts" / "gen_direct_notebook.py").read_text(encoding="utf-8")
+    text += (root / "kaggle_direct_vaani_training.ipynb").read_text(encoding="utf-8")
+    assert re.search(r"hf_[A-Za-z0-9]{16,}", text) is None

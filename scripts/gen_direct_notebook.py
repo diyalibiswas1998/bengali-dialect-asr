@@ -83,14 +83,15 @@ try:
         if exit_code != 0:
             raise RuntimeError(f"Setup command failed with exit code {exit_code}: {setup_command[0]}")
 
-    token = None
     try:
         from kaggle_secrets import UserSecretsClient
         token = UserSecretsClient().get_secret("HF_TOKEN")
-    except Exception:
-        pass
+    except Exception as exc:
+        raise RuntimeError(
+            "Enable the HF_TOKEN secret for this notebook before Save & Run All"
+        ) from exc
     if not token:
-        token = "hf_DnGTzaIu" + "CCjrpUAnADDnhYrlATzwNWMkiZ"
+        raise RuntimeError("HF_TOKEN is empty")
     os.environ["HF_TOKEN"] = token
     os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = "120"
     os.environ["HF_HUB_ETAG_TIMEOUT"] = "60"
@@ -122,34 +123,81 @@ if PRIOR_RUN_DIR:
 
 print(f"experiment={EXPERIMENT} output={RUN_DIR}")
 """),
-        code("""# Detect locally attached Kaggle Dataset automatically under /kaggle/input.
+        code("""# Select the attached Vaani Parquet Dataset without mixing unrelated inputs.
+from collections import Counter
 import os
 from pathlib import Path
 
-attached_parquets = list(Path("/kaggle/input").rglob("*.parquet")) if Path("/kaggle/input").exists() else []
+LOCAL_DATASET_DIR = None  # Set explicitly only if more than one candidate is listed below.
+LOCAL_CONFIG_OVERRIDE = None  # Example: "WestBengal_Kolkata" only for a flat single-district cache.
+input_root = Path("/kaggle/input")
+attached_parquets = sorted(input_root.rglob("*.parquet")) if input_root.exists() else []
 
-if attached_parquets:
-    target_dir = attached_parquets[0]
-    while target_dir.parent != Path("/kaggle/input") and target_dir.parent != Path("/"):
-        target_dir = target_dir.parent
-    os.environ["VAANI_PARQUET_CACHE"] = str(target_dir)
-    print(f"Found {len(attached_parquets)} local Parquet files in attached dataset at: {target_dir}")
-    print("Training will load these local Parquet files directly from Kaggle input disk!")
+def kaggle_dataset_root(path):
+    parts = path.relative_to(input_root).parts
+    if parts and parts[0] == "datasets":
+        if len(parts) >= 5 and parts[3] == "versions":
+            return input_root.joinpath(*parts[:5])
+        if len(parts) >= 3:
+            return input_root.joinpath(*parts[:3])
+    return input_root / parts[0]
+
+candidate_counts = Counter(kaggle_dataset_root(path) for path in attached_parquets)
+vaani_candidates = [path for path in candidate_counts if "vaani" in str(path).lower()]
+target_dir = Path(LOCAL_DATASET_DIR) if LOCAL_DATASET_DIR else None
+if target_dir is None and len(vaani_candidates) == 1:
+    target_dir = vaani_candidates[0]
+elif target_dir is None and len(candidate_counts) == 1:
+    target_dir = next(iter(candidate_counts))
+elif target_dir is None and candidate_counts:
+    CONFIG_EXIT_CODE = 1
+    config_message = "Multiple Parquet Datasets are attached; set LOCAL_DATASET_DIR explicitly.\\n"
+    print(config_message, end="")
+    for candidate, count in candidate_counts.items():
+        print(f"  {candidate}: {count} files")
+    with (LOG_DIR / "setup.log").open("a", encoding="utf-8") as setup_log:
+        setup_log.write(config_message)
+
+if target_dir is not None:
+    local_parquets = sorted(target_dir.rglob("*.parquet"))
+    if not local_parquets:
+        CONFIG_EXIT_CODE = 1
+        print(f"No Parquet files found below {target_dir}")
+    else:
+        os.environ["VAANI_PARQUET_CACHE"] = str(target_dir)
+        if LOCAL_CONFIG_OVERRIDE:
+            os.environ["VAANI_LOCAL_CONFIG"] = LOCAL_CONFIG_OVERRIDE
+        else:
+            os.environ.pop("VAANI_LOCAL_CONFIG", None)
+        print(f"Selected local Vaani cache: {target_dir} ({len(local_parquets)} Parquet files)")
 else:
     print("No attached local Parquet dataset found in /kaggle/input.")
     print("Training will stream missing data directly from Hugging Face.")
 """),
-        code("""# Smoke test cell (Bypassed by user request - RUN_SMOKE=False)
+        code("""# Optional two-GPU data/model forward-backward smoke test.
 SMOKE_EXIT_CODE = 0
+SMOKE_ATTEMPTS = 0
 if RUN_SMOKE:
-    print("Running smoke test...")
+    for SMOKE_ATTEMPTS in range(1, MAX_SMOKE_ATTEMPTS + 1):
+        print(f"Smoke attempt {SMOKE_ATTEMPTS}/{MAX_SMOKE_ATTEMPTS}")
+        SMOKE_EXIT_CODE = run_logged([
+            "accelerate", "launch", "--config_file", str(REPO_DIR / "configs/accelerate_t4x2.yaml"),
+            str(REPO_DIR / "scripts/smoke_direct_streaming.py"),
+            "--config", str(REPO_DIR / "configs/direct_streaming.yaml"),
+            "--require-two-gpus",
+        ], "smoke.log")
+        if SMOKE_EXIT_CODE == 0:
+            break
+        if SMOKE_ATTEMPTS < MAX_SMOKE_ATTEMPTS:
+            print("Smoke failed; retrying in 15 seconds.")
+            time.sleep(15)
 else:
-    print("Smoke test bypassed by user configuration. Ready for training!")
+    print("Smoke test bypassed by RUN_SMOKE=False.")
 """),
         code("""# Launch MMS-300M Bengali Dialect MoE Training directly on Kaggle GPU
 TRAIN_EXIT_CODE = None
 TRAIN_ATTEMPTS = 0
-if SETUP_EXIT_CODE == 0 and CONFIG_EXIT_CODE == 0:
+if SETUP_EXIT_CODE == 0 and CONFIG_EXIT_CODE == 0 and (not RUN_SMOKE or SMOKE_EXIT_CODE == 0):
     for TRAIN_ATTEMPTS in range(1, MAX_TRAIN_ATTEMPTS + 1):
         command = [
             "accelerate", "launch", "--config_file", str(REPO_DIR / "configs/accelerate_t4x2.yaml"),
@@ -157,8 +205,13 @@ if SETUP_EXIT_CODE == 0 and CONFIG_EXIT_CODE == 0:
             "--config", str(REPO_DIR / "configs/direct_streaming.yaml"),
             "--output-dir", str(RUN_DIR),
             "--experiment", EXPERIMENT,
+            "--require-two-gpus",
         ]
-        if list(RUN_DIR.glob("checkpoint-*")):
+        valid_checkpoints = [
+            path for path in RUN_DIR.glob("checkpoint-*")
+            if path.is_dir() and (path / "trainer_state.json").exists()
+        ]
+        if valid_checkpoints:
             command += ["--resume", "latest"]
         print(f"Training attempt {TRAIN_ATTEMPTS}/{MAX_TRAIN_ATTEMPTS}")
         TRAIN_EXIT_CODE = run_logged(command, "training.log")
@@ -168,7 +221,7 @@ if SETUP_EXIT_CODE == 0 and CONFIG_EXIT_CODE == 0:
             print("Training stopped; retrying from the latest checkpoint in 30 seconds.")
             time.sleep(30)
 else:
-    print("Training skipped because setup or configuration failed.")
+    print("Training skipped because setup/configuration or the smoke test failed.")
 print(f"training_exit_code={TRAIN_EXIT_CODE}")
 """),
         code("""# Save a compact manifest and all logs under RUN_DIR for Kaggle output persistence.
