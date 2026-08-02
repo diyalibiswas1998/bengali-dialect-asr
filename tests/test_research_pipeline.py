@@ -441,6 +441,9 @@ def test_four_dialect_500_notebook_and_schedule():
     assert 'str(REPO_DIR / "scripts/trainer.py")' in code_text
     assert 'str(REPO_DIR / "configs/kaggle_four_dialect_500.yaml")' in code_text
     assert "four-dialect-of-bengali-covering-11-district" in code_text
+    assert 'input_root.rglob("train.zip")' in code_text
+    assert 'input_root.rglob("train")' in code_text
+    assert "Restart Session and then Run All" in code_text
     assert 'os.environ["VAANI_ALLOW_HF_FALLBACK"] = "0"' in code_text
     assert "smoke_direct_streaming.py" not in code_text
     assert "load_dataset(" not in code_text

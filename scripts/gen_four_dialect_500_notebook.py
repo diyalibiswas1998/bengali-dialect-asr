@@ -52,9 +52,46 @@ DISTRICT_TO_DIALECT = {
     "Kolkata": "Rarhi",
 }
 SPLITS = ("train", "validation", "test")
-data_root = Path(LOCAL_DATASET_DIR)
-directory_mode = data_root.is_dir() and all((data_root / split).is_dir() for split in SPLITS)
-zip_mode = data_root.is_dir() and all((data_root / f"{split}.zip").is_file() for split in SPLITS)
+input_root = Path("/kaggle/input")
+
+def storage_mode(path):
+    """Return the supported layout at path, or None when it is not a dataset root."""
+    if not path.is_dir():
+        return None
+    if all((path / split).is_dir() for split in SPLITS):
+        return "directories"
+    if all((path / f"{split}.zip").is_file() for split in SPLITS):
+        return "split-zips"
+    return None
+
+preferred_root = Path(LOCAL_DATASET_DIR) if LOCAL_DATASET_DIR else None
+candidate_roots = set()
+if input_root.is_dir():
+    # Kaggle may mount a Dataset below a generated or nested directory instead
+    # of the public slug. Discover both supported layouts from their train item.
+    for train_zip in input_root.rglob("train.zip"):
+        if train_zip.is_file() and storage_mode(train_zip.parent):
+            candidate_roots.add(train_zip.parent)
+    for train_dir in input_root.rglob("train"):
+        if train_dir.is_dir() and storage_mode(train_dir.parent):
+            candidate_roots.add(train_dir.parent)
+
+candidates = sorted(candidate_roots, key=lambda path: str(path))
+expected_slug = ATTACHED_DATASET_SOURCE.rsplit("/", 1)[-1].lower()
+preferred_candidates = [path for path in candidates if expected_slug in str(path).lower()]
+
+if preferred_root is not None and storage_mode(preferred_root):
+    data_root = preferred_root
+elif len(preferred_candidates) == 1:
+    data_root = preferred_candidates[0]
+elif len(candidates) == 1:
+    data_root = candidates[0]
+else:
+    data_root = None
+
+mode = storage_mode(data_root) if data_root is not None else None
+directory_mode = mode == "directories"
+zip_mode = mode == "split-zips"
 
 selection = {
     "kaggle_dataset_source": ATTACHED_DATASET_SOURCE,
@@ -62,11 +99,17 @@ selection = {
     "splits": {},
 }
 split_ids = {}
-if not data_root.is_dir():
+if data_root is None:
     CONFIG_EXIT_CODE = 1
+    mounted = sorted(path.name for path in input_root.iterdir()) if input_root.is_dir() else []
     print(
-        f"Attached dataset path is missing: {data_root}. Add "
-        f"{ATTACHED_DATASET_SOURCE} in Kaggle's Input panel."
+        f"Could not locate one valid root for {ATTACHED_DATASET_SOURCE}. "
+        f"Candidates={list(map(str, candidates))}; mounted_inputs={mounted}."
+    )
+    print(
+        "Expected train.zip, validation.zip, and test.zip in one directory "
+        "(or train/validation/test directories). If the Input was attached after "
+        "this session started, use Restart Session and then Run All."
     )
 elif not (directory_mode or zip_mode):
     CONFIG_EXIT_CODE = 1
@@ -75,7 +118,7 @@ elif not (directory_mode or zip_mode):
         "or train.zip, validation.zip, and test.zip."
     )
 else:
-    selection["storage_mode"] = "directories" if directory_mode else "split-zips"
+    selection["storage_mode"] = mode
     for split in SPLITS:
         district_ids = {district: {"wav": set(), "txt": set()} for district in DISTRICT_TO_DIALECT}
         ignored = set()
