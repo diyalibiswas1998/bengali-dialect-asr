@@ -1,0 +1,44 @@
+seed: 42
+experiment: moe
+
+data:
+  dataset: kaggle-four-dialect-bengali-audio
+  revision: attached-input-v1
+  min_duration: 0.5
+  max_duration: 30.0
+  shuffle_buffer: 1000
+  validation_samples: 1000
+
+model:
+  pretrained_model: facebook/mms-300m
+  num_dialects: 4
+  num_tokens: 128
+  use_moe: true
+  use_router: true
+  use_shared_expert: true
+  top_k: 2
+  dropout: 0.1
+  gradient_checkpointing: true
+
+loss:
+  ctc_weight: 1.0
+  dialect_weight: 0.2
+  balance_weight: 0.01
+
+training:
+  per_device_batch_size: 1
+  gradient_accumulation_steps: 16
+  mixed_precision: fp16
+  num_workers: 0
+  head_lr: 2.0e-4
+  encoder_lr: 1.0e-5
+  final_encoder_lr: 5.0e-6
+  weight_decay: 0.01
+  warmup_ratio: 0.05
+  max_grad_norm: 1.0
+  unfrozen_top_layers: 4
+  steps_per_phase: 500
+  estimated_optimizer_steps_per_phase: 500
+  checkpoint_every_steps: 100
+  keep_last_step_checkpoints: 2
+  log_every_steps: 200

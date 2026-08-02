@@ -5,8 +5,9 @@ from __future__ import annotations
 import hashlib
 import random
 import re
+import zipfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Dict, Iterator, Mapping, Optional, Sequence
 
 import torch
@@ -150,6 +151,77 @@ class VaaniStreamingDataset(IterableDataset):
                 "_dialect_from_district": True,
             }
 
+    def _zipped_audio_rows(self, root: Path, worker) -> Iterator[Mapping]:
+        """Yield approved district WAV/TXT pairs directly from a local split ZIP."""
+        archive_path = root / f"{self.options.split}.zip"
+        if not archive_path.is_file():
+            raise RuntimeError(f"Missing local split archive: {archive_path}")
+
+        with zipfile.ZipFile(archive_path) as archive:
+            members = [info.filename for info in archive.infolist() if not info.is_dir()]
+            by_district = {district: {"wav": {}, "txt": {}} for district in DISTRICT_TO_DIALECT}
+            ignored_districts = set()
+            for member in members:
+                parts = list(PurePosixPath(member).parts)
+                if parts and parts[0].lower() == self.options.split.lower():
+                    parts = parts[1:]
+                if len(parts) < 2:
+                    continue
+                district = parts[0]
+                if district not in DISTRICT_TO_DIALECT:
+                    ignored_districts.add(district)
+                    continue
+                relative = PurePosixPath(*parts[1:])
+                suffix = relative.suffix.lower()
+                if suffix not in {".wav", ".txt"}:
+                    continue
+                key = relative.with_suffix("").as_posix()
+                by_district[district][suffix.removeprefix(".")][key] = member
+
+            entries = []
+            counts = {}
+            pair_errors = []
+            for district, paths in by_district.items():
+                wav_keys = set(paths["wav"])
+                txt_keys = set(paths["txt"])
+                if wav_keys != txt_keys:
+                    pair_errors.append(
+                        f"{district}: missing_text={len(wav_keys - txt_keys)} "
+                        f"missing_audio={len(txt_keys - wav_keys)}"
+                    )
+                    continue
+                counts[district] = len(wav_keys)
+                entries.extend(
+                    (district, key, paths["wav"][key], paths["txt"][key])
+                    for key in wav_keys
+                )
+            if pair_errors:
+                raise RuntimeError("Invalid ZIP WAV/TXT pairs: " + "; ".join(pair_errors))
+            if not entries:
+                raise RuntimeError(f"No paired WAV/TXT samples found in {archive_path}")
+
+            random.Random(self.options.seed + self.options.epoch * 1009).shuffle(entries)
+            print(
+                f"[VaaniDataset] local_zip_split={self.options.split} samples={len(entries)} "
+                f"district_counts={counts} ignored_districts={sorted(ignored_districts)}",
+                flush=True,
+            )
+            for index, (district, key, wav_member, txt_member) in enumerate(entries):
+                if worker is not None and index % worker.num_workers != worker.id:
+                    continue
+                transcript = archive.read(txt_member).decode("utf-8-sig")
+                yield {
+                    "audio": {"bytes": archive.read(wav_member)},
+                    "transcript": transcript,
+                    "language": "Bengali",
+                    "speakerID": f"{district}/{key}",
+                    "district": district,
+                    "residence_district": district,
+                    "sample_id": f"{district}/{key}",
+                    "_preassigned_split": self.options.split,
+                    "_dialect_from_district": True,
+                }
+
     def _source_streams(self):
         import os
         from datasets import Audio, load_dataset
@@ -164,7 +236,15 @@ class VaaniStreamingDataset(IterableDataset):
             root = Path(audio_root)
             if not root.is_dir():
                 raise RuntimeError(f"VAANI_AUDIO_ROOT does not exist: {root}")
-            yield "", self._paired_audio_rows(root, worker)
+            if (root / self.options.split).is_dir():
+                stream = self._paired_audio_rows(root, worker)
+            elif (root / f"{self.options.split}.zip").is_file():
+                stream = self._zipped_audio_rows(root, worker)
+            else:
+                raise RuntimeError(
+                    f"{root} has neither {self.options.split}/ nor {self.options.split}.zip"
+                )
+            yield "", stream
             return
 
         cache_dir = os.environ.get("VAANI_PARQUET_CACHE", "")

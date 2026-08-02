@@ -383,7 +383,10 @@ def main():
                     batch_in_phase=absolute_batch + 1,
                     complete=False,
                 )
-                if phase_step % int(config.training.log_every_steps) == 0:
+                if (
+                    phase_step % int(config.training.log_every_steps) == 0
+                    or phase_step == updates_per_phase
+                ):
                     accelerator.print(
                         f"progress phase={phase}/3 phase_step={phase_step}/{updates_per_phase} "
                         f"global_step={state['global_step']}/{updates_per_phase * 3} "

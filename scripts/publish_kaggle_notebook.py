@@ -15,7 +15,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--username", required=True)
     parser.add_argument(
-        "--notebook", choices=("creator", "training", "direct", "local-four"), required=True
+        "--notebook",
+        choices=("creator", "training", "direct", "local-four", "four-500"),
+        required=True,
     )
     parser.add_argument("--processed-dataset", default=None, help="owner/slug; required for training")
     parser.add_argument("--dataset-source", default=None, help="owner/slug to attach to any notebook")
@@ -37,12 +39,14 @@ def main():
         "training": "kaggle_vaani_training.ipynb",
         "direct": "kaggle_direct_vaani_training.ipynb",
         "local-four": "kaggle_local_four_dialect_training.ipynb",
+        "four-500": "kaggle_four_dialect_500_training.ipynb",
     }
     slugs = {
         "creator": "vaani-bengali-processed-builder",
         "training": "bengali-dialect-mms-moe-training",
         "direct": "direct-vaani-mms-moe-training",
         "local-four": "local-four-dialect-mms-moe-training",
+        "four-500": "bengali-four-dialect-mms-moe-500-steps",
     }
     code_file = code_files[args.notebook]
     slug = slugs[args.notebook]
@@ -53,7 +57,7 @@ def main():
         "language": "python",
         "kernel_type": "notebook",
         "is_private": True,
-        "enable_gpu": args.notebook in {"training", "direct", "local-four"},
+        "enable_gpu": args.notebook in {"training", "direct", "local-four", "four-500"},
         "enable_internet": True,
         "dataset_sources": [dataset_source] if dataset_source else [],
         "competition_sources": [],

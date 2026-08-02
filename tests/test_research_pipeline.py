@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import time
+import zipfile
 from types import SimpleNamespace
 
 import numpy as np
@@ -305,6 +306,24 @@ def test_paired_audio_loader_uses_only_allowlist_and_supplied_split(tmp_path, mo
     assert all(sample["dialect_label_mask"].item() for sample in prepared)
 
 
+def test_zipped_audio_loader_uses_only_allowlist_and_supplied_split(tmp_path):
+    with zipfile.ZipFile(tmp_path / "train.zip", "w") as archive:
+        for district in DISTRICT_TO_DIALECT:
+            archive.writestr(f"{district}/{district}_sample.wav", b"synthetic")
+            archive.writestr(f"{district}/{district}_sample.txt", "বাংলা কথা")
+        archive.writestr("Bangalore/ignored.wav", b"synthetic")
+        archive.writestr("Bangalore/ignored.txt", "বাংলা")
+    dataset = VaaniStreamingDataset(
+        StreamingOptions(split="train", token="", revision="local", allow_hf_fallback=False),
+        fixed_bengali_tokenizer(),
+    )
+    rows = list(dataset._zipped_audio_rows(tmp_path, worker=None))
+    assert len(rows) == 11
+    assert {row["district"] for row in rows} == set(DISTRICT_TO_DIALECT)
+    assert all(row["audio"]["bytes"] == b"synthetic" for row in rows)
+    assert all(row["_preassigned_split"] == "train" for row in rows)
+
+
 def test_direct_notebook_saves_manifest_when_setup_fails(tmp_path):
     notebook_path = Path(__file__).resolve().parents[1] / "kaggle_direct_vaani_training.ipynb"
     notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
@@ -397,3 +416,32 @@ def test_local_four_dialect_notebook_is_local_only_and_uses_trainer():
         "DakshinDinajpur", "North24Parganas", "Kolkata",
     }
     assert set(DIALECT_TO_IDX) == {"Rarhi", "Varendri", "Jharkhandi", "Kamrupi"}
+
+
+def test_four_dialect_500_notebook_and_schedule():
+    root = Path(__file__).resolve().parents[1]
+    config = OmegaConf.load(root / "configs" / "kaggle_four_dialect_500.yaml")
+    assert config.model.num_dialects == 4
+    assert config.training.steps_per_phase == 500
+    assert config.training.estimated_optimizer_steps_per_phase == 500
+    assert config.training.log_every_steps == 200
+    assert config.training.checkpoint_every_steps == 100
+
+    notebook = json.loads(
+        (root / "kaggle_four_dialect_500_training.ipynb").read_text(encoding="utf-8")
+    )
+    code_text = "\n".join(
+        "".join(cell["source"])
+        for cell in notebook["cells"]
+        if cell["cell_type"] == "code"
+    )
+    for cell in notebook["cells"]:
+        if cell["cell_type"] == "code":
+            compile("".join(cell["source"]), f"notebook-{cell['id']}", "exec")
+    assert 'str(REPO_DIR / "scripts/trainer.py")' in code_text
+    assert 'str(REPO_DIR / "configs/kaggle_four_dialect_500.yaml")' in code_text
+    assert "four-dialect-of-bengali-covering-11-district" in code_text
+    assert 'os.environ["VAANI_ALLOW_HF_FALLBACK"] = "0"' in code_text
+    assert "smoke_direct_streaming.py" not in code_text
+    assert "load_dataset(" not in code_text
+    assert "--max-train-samples" not in code_text
