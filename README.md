@@ -56,7 +56,7 @@ The three passes are fixed by `configs/research.yaml`:
 2. unfreeze the top four MMS transformer blocks at `1e-5`;
 3. continue with those blocks at `5e-6`.
 
-The head/MoE LR is `2e-4`; CTC/dialect/load-balancing weights are `1.0/0.2/0.01`. Dialect supervision aligns both the classifier and router, sparse dispatch evaluates only selected dialect experts, and balancing statistics are recomputed over the gathered effective batch. T4×2 uses FP16, per-device batch 1, accumulation 16 (effective batch 32), storage-local duration buckets, 5% warmup, linear decay, and gradient clipping 1.0. Checkpoints are written every 2,000 optimizer updates and at every phase boundary. They contain model, optimizer, scheduler, scaler, RNG, next batch position, sanitized config, vocabulary, mapping, and content-complete split fingerprints.
+The head/MoE LR is `2e-4`; CTC/dialect/load-balancing weights are `1.0/0.2/0.01`. Dialect supervision trains the explicit dialect classifier; router expert IDs remain latent and are evaluated with permutation-invariant clustering and utilization metrics. Sparse dispatch evaluates only selected dialect experts, and balancing statistics are recomputed over the gathered effective batch. T4×2 uses FP16, per-device batch 1, accumulation 16 (effective batch 32), storage-local duration buckets, 5% warmup, linear decay, and gradient clipping 1.0. Checkpoints are written every 2,000 optimizer updates and at every phase boundary. They contain model, optimizer, scheduler, scaler, RNG, next batch position, sanitized config, vocabulary, mapping, and content-complete split fingerprints.
 
 Run the identical-split experiments with only `--experiment` changed:
 
@@ -92,6 +92,8 @@ accelerate launch --config_file configs/accelerate_t4x2.yaml \
 ```
 
 The JSON report includes overall WER/CER, macro and per-dialect scores, source- and residence-district scores, dialect-head and router macro-F1/confusion matrices, expert utilization, speaker-bootstrap 95% confidence intervals, and residence-based sensitivity excluding Darjeeling and North 24 Parganas. Router classification is intentionally omitted for the no-dialect-loss ablation because expert IDs are then permutation-invariant.
+
+For checkpoints trained directly from the attached WAV/TXT Dataset, use `kaggle_four_dialect_evaluation.ipynb`. Attach the audio Dataset plus the output of `diyalibiswas/bengali-four-dialect-mms-moe-500-steps`, select GPU T4 x2, and run all cells. It chooses the phase checkpoint with the lowest saved validation loss and evaluates the uncapped test split. Outputs include predictions, overall/macro/weighted/worst-group ASR, per-dialect and per-district tables, imbalance-aware dialect metrics, normalized confusion matrices, ROC/precision-recall curves, router clustering/utilization, boundary sensitivity, and dialect-stratified bootstrap intervals.
 
 ## Research constraints
 

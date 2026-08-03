@@ -16,11 +16,15 @@ def main():
     parser.add_argument("--username", required=True)
     parser.add_argument(
         "--notebook",
-        choices=("creator", "training", "direct", "local-four", "four-500"),
+        choices=("creator", "training", "direct", "local-four", "four-500", "evaluation"),
         required=True,
     )
     parser.add_argument("--processed-dataset", default=None, help="owner/slug; required for training")
     parser.add_argument("--dataset-source", default=None, help="owner/slug to attach to any notebook")
+    parser.add_argument(
+        "--kernel-source", action="append", default=[],
+        help="owner/slug of a Kaggle notebook output to attach; may be repeated",
+    )
     args = parser.parse_args()
     kaggle_executable = shutil.which("kaggle")
     if kaggle_executable:
@@ -40,6 +44,7 @@ def main():
         "direct": "kaggle_direct_vaani_training.ipynb",
         "local-four": "kaggle_local_four_dialect_training.ipynb",
         "four-500": "kaggle_four_dialect_500_training.ipynb",
+        "evaluation": "kaggle_four_dialect_evaluation.ipynb",
     }
     slugs = {
         "creator": "vaani-bengali-processed-builder",
@@ -47,6 +52,7 @@ def main():
         "direct": "direct-vaani-mms-moe-training",
         "local-four": "local-four-dialect-mms-moe-training",
         "four-500": "bengali-four-dialect-mms-moe-500-steps",
+        "evaluation": "bengali-four-dialect-mms-moe-evaluation",
     }
     code_file = code_files[args.notebook]
     slug = slugs[args.notebook]
@@ -57,11 +63,11 @@ def main():
         "language": "python",
         "kernel_type": "notebook",
         "is_private": True,
-        "enable_gpu": args.notebook in {"training", "direct", "local-four", "four-500"},
+        "enable_gpu": args.notebook in {"training", "direct", "local-four", "four-500", "evaluation"},
         "enable_internet": True,
         "dataset_sources": [dataset_source] if dataset_source else [],
         "competition_sources": [],
-        "kernel_sources": [],
+        "kernel_sources": args.kernel_source,
     }
     with tempfile.TemporaryDirectory(prefix="kaggle-kernel-") as temporary:
         package = Path(temporary)

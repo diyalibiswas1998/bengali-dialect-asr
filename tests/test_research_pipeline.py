@@ -36,6 +36,12 @@ from asr_dialect_benchmark.data.streaming_vaani import (
 )
 from asr_dialect_benchmark.training.sampler import LengthBucketBatchSampler
 from asr_dialect_benchmark.evaluation.metrics import asr_rates, classification_report
+from asr_dialect_benchmark.evaluation.extended_metrics import (
+    classification_report_imbalanced,
+    grouped_asr_report,
+    router_clustering_report,
+    stratified_bootstrap_intervals,
+)
 from asr_dialect_benchmark.losses.ctc_losses import multitask_loss
 from asr_dialect_benchmark.modeling.asr_model import BengaliDialectASR
 from asr_dialect_benchmark.tokenization.simple_tokenizer import SimpleTokenizer, normalize_bengali_text
@@ -324,6 +330,71 @@ def test_zipped_audio_loader_uses_only_allowlist_and_supplied_split(tmp_path):
     assert all(row["_preassigned_split"] == "train" for row in rows)
 
 
+def test_process_shards_partition_direct_audio_without_overlap(tmp_path):
+    split_dir = tmp_path / "test"
+    for district in DISTRICT_TO_DIALECT:
+        district_dir = split_dir / district
+        district_dir.mkdir(parents=True)
+        (district_dir / "sample.wav").write_bytes(b"synthetic")
+        (district_dir / "sample.txt").write_text("বাংলা", encoding="utf-8")
+    shards = []
+    for process_index in range(2):
+        dataset = VaaniStreamingDataset(
+            StreamingOptions(
+                split="test", token="", revision="local", allow_hf_fallback=False,
+                process_index=process_index, num_processes=2,
+            ),
+            fixed_bengali_tokenizer(),
+        )
+        shards.append(
+            {
+                f"{row['district']}/{row['sample_id']}"
+                for row in dataset._paired_audio_rows(tmp_path, worker=None)
+            }
+        )
+    assert shards[0].isdisjoint(shards[1])
+    assert len(shards[0] | shards[1]) == len(DISTRICT_TO_DIALECT)
+
+
+def test_imbalance_aware_metrics_and_router_permutation_invariance():
+    rows = [
+        {
+            "reference": "আমি বাংলা",
+            "prediction": "আমি বাংলা" if index != 3 else "আমি",
+            "dialect_group": ("Rarhi", "Varendri", "Jharkhandi", "Kamrupi")[label],
+            "source_district": f"district-{label}",
+        }
+        for index, label in enumerate([0, 0, 0, 0, 1, 2, 3])
+    ]
+    y_true = np.asarray([0, 0, 0, 0, 1, 2, 3])
+    y_pred = np.asarray([0, 0, 0, 0, 0, 0, 0])
+    probabilities = np.full((len(y_true), 4), 0.05)
+    probabilities[np.arange(len(y_true)), y_pred] = 0.85
+    report = classification_report_imbalanced(
+        y_true, y_pred, probabilities, ["Rarhi", "Varendri", "Jharkhandi", "Kamrupi"]
+    )
+    assert report["imbalance_ratio_max_to_min"] == 4.0
+    assert report["balanced_accuracy_macro_recall"] < report["accuracy_micro"]
+    assert report["f1_macro"] <= report["f1_weighted"]
+    asr = grouped_asr_report(rows, "dialect_group")
+    assert asr["overall_micro"]["utterances"] == 7
+    assert asr["worst_group"]["wer"]["group"] == "Rarhi"
+
+    permutation = np.asarray([2, 2, 2, 2, 0, 3, 1])
+    gates = np.full((len(y_true), 4), 0.01)
+    gates[np.arange(len(y_true)), permutation] = 0.97
+    topk = np.argsort(gates, axis=1)[:, -2:]
+    router = router_clustering_report(
+        y_true, gates, topk, ["Rarhi", "Varendri", "Jharkhandi", "Kamrupi"]
+    )
+    assert router["normalized_mutual_information"] == pytest.approx(1.0)
+    bootstrap = stratified_bootstrap_intervals(
+        rows, y_true, y_pred, iterations=20, seed=7
+    )
+    assert bootstrap["iterations"] == 20
+    assert len(bootstrap["macro_f1"]["95ci"]) == 2
+
+
 def test_direct_notebook_saves_manifest_when_setup_fails(tmp_path):
     notebook_path = Path(__file__).resolve().parents[1] / "kaggle_direct_vaani_training.ipynb"
     notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
@@ -448,3 +519,29 @@ def test_four_dialect_500_notebook_and_schedule():
     assert "smoke_direct_streaming.py" not in code_text
     assert "load_dataset(" not in code_text
     assert "--max-train-samples" not in code_text
+
+
+def test_full_evaluation_notebook_is_direct_full_test_and_imbalance_aware():
+    root = Path(__file__).resolve().parents[1]
+    accelerate_config = OmegaConf.load(root / "configs" / "accelerate_t4x2.yaml")
+    assert accelerate_config.num_processes == 2
+    assert accelerate_config.gpu_ids == "all"
+    notebook = json.loads(
+        (root / "kaggle_four_dialect_evaluation.ipynb").read_text(encoding="utf-8")
+    )
+    code_text = "\n".join(
+        "".join(cell["source"])
+        for cell in notebook["cells"]
+        if cell["cell_type"] == "code"
+    )
+    for cell in notebook["cells"]:
+        if cell["cell_type"] == "code":
+            compile("".join(cell["source"]), f"notebook-{cell['id']}", "exec")
+    assert 'str(REPO_DIR / "scripts/evaluate_direct.py")' in code_text
+    assert 'SPLIT = "test"' in code_text
+    assert "BOOTSTRAP_ITERATIONS = 1000" in code_text
+    assert "checkpoint-phase-*" in code_text
+    assert "validation_loss" in code_text
+    assert '"--max-samples"' not in code_text
+    assert "GPU T4 x2" in code_text
+    assert 'os.environ["VAANI_ALLOW_HF_FALLBACK"] = "0"' in code_text

@@ -81,6 +81,8 @@ class StreamingOptions:
     max_duration: float = 30.0
     shuffle_buffer: int = 1_000
     max_samples: Optional[int] = None
+    process_index: int = 0
+    num_processes: int = 1
 
 
 class VaaniStreamingDataset(IterableDataset):
@@ -90,11 +92,22 @@ class VaaniStreamingDataset(IterableDataset):
         super().__init__()
         if options.split not in {"train", "validation", "test"}:
             raise ValueError(f"Unknown split: {options.split}")
+        if options.num_processes < 1 or not 0 <= options.process_index < options.num_processes:
+            raise ValueError(
+                f"Invalid process shard {options.process_index}/{options.num_processes}"
+            )
         self.options = options
         self.tokenizer = tokenizer or fixed_bengali_tokenizer()
 
     def set_epoch(self, epoch: int) -> None:
         self.options.epoch = int(epoch)
+
+    def _accept_shard(self, index: int, worker) -> bool:
+        workers = worker.num_workers if worker is not None else 1
+        worker_id = worker.id if worker is not None else 0
+        shard_count = self.options.num_processes * workers
+        shard_index = self.options.process_index * workers + worker_id
+        return index % shard_count == shard_index
 
     def _paired_audio_rows(self, root: Path, worker) -> Iterator[Mapping]:
         """Yield only the 11 approved district folders from a supplied split."""
@@ -136,7 +149,7 @@ class VaaniStreamingDataset(IterableDataset):
             flush=True,
         )
         for index, (district, wav_path, txt_path) in enumerate(entries):
-            if worker is not None and index % worker.num_workers != worker.id:
+            if not self._accept_shard(index, worker):
                 continue
             transcript = txt_path.read_text(encoding="utf-8-sig")
             yield {
@@ -207,7 +220,7 @@ class VaaniStreamingDataset(IterableDataset):
                 flush=True,
             )
             for index, (district, key, wav_member, txt_member) in enumerate(entries):
-                if worker is not None and index % worker.num_workers != worker.id:
+                if not self._accept_shard(index, worker):
                     continue
                 transcript = archive.read(txt_member).decode("utf-8-sig")
                 yield {
