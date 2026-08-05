@@ -359,6 +359,7 @@ def audit_checkpoint(
     label_counts = Counter()
     label_total = 0
     label_examples = []
+    label_decode_mismatches = []
     frame_counts = Counter()
     predictions = []
     invalid_lengths = []
@@ -381,15 +382,24 @@ def audit_checkpoint(
         for row, target in zip(batch_rows, target_lists):
             label_counts.update(int(item) for item in target)
             label_total += len(target)
+            decoded_target = processor.tokenizer.decode(
+                target, group_tokens=False, skip_special_tokens=True
+            ).strip()
+            if decoded_target != row["transcript"] and len(label_decode_mismatches) < 20:
+                label_decode_mismatches.append(
+                    {
+                        "sample_id": row["sample_id"],
+                        "reference": row["transcript"],
+                        "decoded_target": decoded_target,
+                    }
+                )
             if len(label_examples) < 5:
                 label_examples.append(
                     {
                         "sample_id": row["sample_id"],
                         "reference": row["transcript"],
                         "target_ids": target,
-                        "decoded_target": processor.tokenizer.decode(
-                            target, group_tokens=False, skip_special_tokens=True
-                        ).strip(),
+                        "decoded_target": decoded_target,
                     }
                 )
         with torch.inference_mode():
@@ -435,6 +445,10 @@ def audit_checkpoint(
                 }
             )
 
+    if label_counts[EXPECTED_BLANK_ID]:
+        raise ValueError(
+            f"Valid targets contain CTC blank ID 0: count={label_counts[EXPECTED_BLANK_ID]}"
+        )
     label_top = [[int(index), int(count)] for index, count in label_counts.most_common(20)]
     frame_total = max(1, sum(frame_counts.values()))
     reference_chars = sum(len(row["reference"].replace(" ", "")) for row in predictions)
@@ -475,6 +489,7 @@ def audit_checkpoint(
             "unknown_fraction": label_counts[1] / max(1, label_total),
             "top_20_target_ids": label_top,
             "decoded_examples": label_examples,
+            "decode_mismatches": label_decode_mismatches,
         },
         "length_audit": {
             "sample_count": len(rows),
