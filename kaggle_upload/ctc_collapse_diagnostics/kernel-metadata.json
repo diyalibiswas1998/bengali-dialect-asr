@@ -1,0 +1,15 @@
+{
+  "id": "diyalibiswas/bengali-ctc-collapse-diagnostics",
+  "title": "Bengali CTC Collapse Diagnostics",
+  "code_file": "bengali_ctc_collapse_diagnostics.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [
+    "diyalibiswas/four-dialect-data-undersampled"
+  ],
+  "machine_shape": "NvidiaTeslaT4"
+}
