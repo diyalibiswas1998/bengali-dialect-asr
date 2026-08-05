@@ -131,3 +131,57 @@ The tiny test requires a manually verified manifest and uses the same 73-token
 processor.  A passing result means non-empty predictions and near-zero CER/WER
 on the same examples.  A failing result means the full MoE experiment must not
 be resumed.
+
+## Kaggle/CLI commands
+
+Clone the immutable diagnostic revision:
+
+```bash
+git clone https://github.com/diyalibiswas1998/bengali-dialect-asr.git
+cd bengali-dialect-asr
+git checkout d58512c
+```
+
+Checkpoint audit (read-only; run in Kaggle with Internet enabled and the dataset/checkpoint attached):
+
+```bash
+python scripts/ctc_collapse_diagnostics.py \
+  --data-root /kaggle/input/four-dialect-data-undersampled \
+  --repo-root /kaggle/working/bengali-dialect-asr \
+  --checkpoint /kaggle/input/<checkpoint-dataset>/<checkpoint-dir> \
+  --output-dir /kaggle/working/ctc-collapse-diagnostics \
+  --sample-count 100 --batch-size 4
+```
+
+Create the tiny manifest:
+
+```bash
+python scripts/ctc_collapse_diagnostics.py \
+  --data-root /kaggle/input/four-dialect-data-undersampled \
+  --repo-root /kaggle/working/bengali-dialect-asr \
+  --output-dir /kaggle/working/ctc-collapse-diagnostics \
+  --make-manifest /kaggle/working/ctc-collapse-diagnostics/tiny_manifest.csv \
+  --manifest-count 32
+```
+
+After listening to all rows and changing `manually_verified` to `YES`, run the
+one-GPU plain-CTC test:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/tiny_overfit_ctc.py \
+  --manifest /kaggle/working/ctc-collapse-diagnostics/tiny_manifest.csv \
+  --checkpoint /kaggle/input/<checkpoint-dataset>/<checkpoint-dir> \
+  --output-dir /kaggle/working/ctc-collapse-diagnostics/tiny-overfit \
+  --batch-size 4 --max-steps 3000 --eval-every 50 --manually-verified
+```
+
+The diagnostic-only notebook is `kaggle_upload/ctc_collapse_diagnostics/
+bengali_ctc_collapse_diagnostics.ipynb`. Kaggle could not publish its GPU
+version while the account was at the 30-hour weekly GPU quota; retry the normal
+push after quota reset:
+
+```bash
+python -m kaggle kernels push \
+  -p kaggle_upload/ctc_collapse_diagnostics \
+  --accelerator NvidiaTeslaT4
+```
