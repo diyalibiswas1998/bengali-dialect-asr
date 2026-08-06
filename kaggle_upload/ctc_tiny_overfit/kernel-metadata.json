@@ -1,0 +1,16 @@
+{
+  "id": "diyalib13/bengali-ctc-final-confirmed-tiny-overfit",
+  "title": "Bengali CTC Final Confirmed Tiny Overfit",
+  "code_file": "bengali_ctc_final_confirmed_tiny_overfit.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [
+    "diyalibiswas/four-dialect-data-undersampled",
+    "diyalibiswas/output"
+  ],
+  "machine_shape": "NvidiaTeslaT4"
+}

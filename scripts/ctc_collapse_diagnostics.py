@@ -12,6 +12,7 @@ import csv
 import hashlib
 import json
 import math
+import numpy as np
 import os
 import random
 import re
@@ -219,9 +220,15 @@ def read_audio(source, archive_cache: dict | None = None):
 def _load_processor(checkpoint: Path, model_name: str):
     from transformers import Wav2Vec2Processor
 
-    candidate = checkpoint / "processor"
-    if not candidate.is_dir():
-        candidate = checkpoint
+    candidates = [checkpoint / "processor", checkpoint]
+    parent = checkpoint.parent
+    for _ in range(3):
+        candidates.append(parent / "processor")
+        parent = parent.parent
+    candidate = next(
+        (path for path in candidates if (path / "processor_config.json").is_file()),
+        checkpoint,
+    )
     processor = Wav2Vec2Processor.from_pretrained(candidate)
     tokenizer = processor.tokenizer
     if len(tokenizer) != EXPECTED_VOCAB_SIZE:

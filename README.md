@@ -1,104 +1,215 @@
-# Bengali Dialect ASR: MMS-300M + Sparse MoE
+# Bengali Dialect ASR
 
-This repository implements a reproducible comparison between an MMS-300M Bengali CTC baseline and a four-expert dialect-aware MoE. It supports both a validated Parquet derivative and direct paired WAV/TXT folders attached locally on Kaggle.
+Research code for Bengali automatic speech recognition across four provisional
+dialect groups using `facebook/mms-300m`, CTC, and an experimental sparse
+mixture-of-experts (MoE) model.
 
-The dialect labels are **provisional geographic proxies**, not linguistic ground truth. The versioned mapping is in `src/asr_dialect_benchmark/common/constants.py`; Darjeeling and North 24 Parganas are treated as boundary cases in evaluation.
+## Current status — 6 August 2026
 
-The maintained four-class mapping is: Rarhi (Kolkata, North24Parganas), Varendri (Malda, DakshinDinajpur), Jharkhandi (Jhargram, PaschimMedinipur, Purulia), and Kamrupi (Alipurduar, CoochBehar, Darjeeling, Jalpaiguri).
+**Full MoE training is paused. Do not use the existing phase-3 checkpoint as a
+working ASR model.** Its tokenizer, labels, audio preprocessing, checkpoint
+weights, and CTC lengths passed audit, but its frame predictions collapsed to
+the word-delimiter token.
 
-## 1. Build the processed corpus once
+The audited phase-3 checkpoint produced the following results on 100 validation
+utterances:
 
-Accept the applicable Hugging Face dataset terms and set `HF_TOKEN` without placing it in a notebook or config. Then run:
+| Metric | Result |
+|---|---:|
+| WER | 100.00% |
+| CER | 91.87% |
+| Delimiter argmax frames | 95.88% |
+| Blank argmax frames | 0.00% |
+| Empty decoded predictions | 4.00% |
+| Invalid CTC lengths | 0 |
+| Unknown or blank IDs in valid targets | 0 |
 
-```bash
-pip install -r requirements.txt
-pip install -e .
-python scripts/build_processed_vaani.py \
-  --source auto \
-  --output-dir /path/to/vaani-bengali-processed
-python scripts/validate_processed.py \
-  --data-dir /path/to/vaani-bengali-processed \
-  --decode-audio
-```
+This is **delimiter-token collapse**, not CTC blank collapse. The next required
+gate is a manually verified 32-sample, plain MMS-CTC overfit test. The latest
+recorded Kaggle check had not yet produced a passing result. Until
+`tiny_overfit_status.json` proves otherwise, the repository makes no claim that
+the full ASR or MoE training schedule works.
 
-`auto` first probes the `Bengali` configuration of `ARTPARK-IISc/Vaani-transcription-part`. It uses that source only when audio, transcript, speaker, duration, district, and residence metadata are present. Authentication/network failures stop immediately. If the fields are missing, rerun with `--allow-main-fallback` to explicitly acknowledge filtering the much larger 11-district raw corpus.
+See [docs/CTC_DELIMITER_COLLAPSE.md](docs/CTC_DELIMITER_COLLAPSE.md) for the
+evidence, architecture risks, ruled-out causes, and experiment order.
 
-Records are NFC-normalized Bengali transcripts with mono 16 kHz FLAC bytes. Rows must have a speaker ID, decode successfully, be 0.5–30 seconds, be CTC-alignable, and be unique by stable ID and audio hash. Only parsed residence districts receive a dialect label; other valid rows remain CTC examples with label `-100`. Speakers are assigned globally to deterministic 80/10/10 splits. Failed builds preserve validated staging; resume them with `--resume-staging /path/to/.building-directory`.
+## Maintained entry points
 
-The output contains `train/`, `validation/`, and `test/` Parquet shards, JSONL split manifests, `metadata.json`, `vocab.json`, `dialect_mapping.json`, and source/license notes. Upload this directory as a **private Kaggle Dataset**, retaining upstream attribution and terms.
+| Purpose | Entry point |
+|---|---|
+| Kaggle checkpoint audit and 32-sample test | `kaggle_upload/ctc_tiny_overfit/` |
+| Checkpoint/token/length audit | `scripts/ctc_collapse_diagnostics.py` |
+| Manifest-aware Kaggle wrapper | `scripts/kaggle_ctc_collapse_diagnostics.py` |
+| Plain MMS-CTC tiny overfit | `scripts/tiny_overfit_ctc.py` |
+| Build an undersampled copy without changing source files | `scripts/build_four_dialect_undersampled.py` |
+| Build/validate the processed Parquet corpus | `scripts/build_processed_vaani.py`, `scripts/validate_processed.py` |
+| Experimental full research trainer | `scripts/train_research.py` |
 
-For a quick pipeline check, add `--max-samples 200`; do not use that cap for reported experiments.
+Older generated notebooks, compatibility wrappers, account-specific notebook
+versions, and one-off patch scripts have been removed. Git is the source of
+truth; do not copy code back from failed Kaggle outputs.
 
-## 2. Train on Kaggle T4×2
+## Data contract
 
-Attach the processed private dataset locally, then launch two processes:
-
-```bash
-accelerate launch --config_file configs/accelerate_t4x2.yaml \
-  scripts/train_research.py \
-  --data-dir /kaggle/input/vaani-bengali-processed \
-  --output-dir /kaggle/working/moe-run \
-  --experiment moe \
-  --resume latest
-```
-
-To publish either maintained notebook through the Kaggle API, configure the Kaggle CLI and run `python scripts/publish_kaggle_notebook.py --username YOUR_USER --notebook creator`; after the processed Dataset exists, publish training with `--notebook training --processed-dataset OWNER/SLUG`. Kernel pushes are private and start a Kaggle execution.
-
-To train directly from the uploaded paired files, use `kaggle_direct_vaani_training.ipynb` or publish it with `python scripts/publish_kaggle_notebook.py --username YOUR_USER --notebook direct`. The attached Dataset must contain `train/`, `validation/`, and `test/`, each with the same 11 district folders and paired `.wav`/`.txt` files. The loader ignores every other district, preserves the supplied splits, globally shuffles the selected training rows, and derives the four dialect proxy labels from the district folder. It uses local-only mode by default and needs no Vaani Hugging Face token.
-
-For the fixed short schedule, use `kaggle_local_four_dialect_training.ipynb` or publish it with `python scripts/publish_kaggle_notebook.py --username YOUR_USER --notebook local-four`. This separate notebook invokes `scripts/trainer.py`, has no preliminary test run, and hard-disables dataset fallback. `configs/local_four_dialect.yaml` runs exactly 1,000 optimizer steps in each of three phases, prints progress every 200 phase steps, and writes resumable checkpoints every 100 global optimizer steps.
-
-Omit `--resume` for the first session. Preserve `/kaggle/working/moe-run` as a private Kaggle Dataset version between sessions, restore it before the next run, and then use `--resume latest`.
-
-The three passes are fixed by `configs/research.yaml`:
-
-1. freeze MMS-300M; train heads, router, four dialect experts, and the shared expert;
-2. unfreeze the top four MMS transformer blocks at `1e-5`;
-3. continue with those blocks at `5e-6`.
-
-The head/MoE LR is `2e-4`; CTC/dialect/load-balancing weights are `1.0/0.2/0.01`. Dialect supervision trains the explicit dialect classifier; router expert IDs remain latent and are evaluated with permutation-invariant clustering and utilization metrics. Sparse dispatch evaluates only selected dialect experts, and balancing statistics are recomputed over the gathered effective batch. T4×2 uses FP16, per-device batch 1, accumulation 16 (effective batch 32), storage-local duration buckets, 5% warmup, linear decay, and gradient clipping 1.0. Checkpoints are written every 2,000 optimizer updates and at every phase boundary. They contain model, optimizer, scheduler, scaler, RNG, next batch position, sanitized config, vocabulary, mapping, and content-complete split fingerprints.
-
-Run the identical-split experiments with only `--experiment` changed:
+The current Kaggle workflow expects either split directories or split ZIP files:
 
 ```text
-baseline   MMS-300M CTC without MoE
-moe        top-2 MoE + dialect + shared expert
-top1       top-1 routing ablation
-no_dialect no dialect-loss ablation
-no_shared  no shared-expert ablation
+dataset-root/
+  train/
+    Alipurduar/*.wav + *.txt
+    ...
+  validation/
+    ...
+  test/
+    ...
 ```
 
-## 3. Validate and evaluate
+Every audio file must have a transcript with the same relative stem. Only these
+11 district folders are accepted:
 
-Before full runs, verify DDP forward/backward and state restoration on T4×2:
+| Dialect proxy | Districts |
+|---|---|
+| Kamrupi | Alipurduar, CoochBehar, Darjeeling, Jalpaiguri |
+| Jharkhandi | Jhargram, PaschimMedinipur, Purulia |
+| Varendri | Malda, DakshinDinajpur |
+| Rarhi | North24Parganas, Kolkata |
+
+These labels are geographic proxies, not definitive linguistic labels.
+Darjeeling and North 24 Parganas remain boundary cases.
+
+## Run on Kaggle
+
+The maintained notebook is self-contained and does not stream the speech
+dataset. Attach these inputs:
+
+1. `diyalibiswas/four-dialect-data-undersampled`
+2. `diyalibiswas/output` (the saved checkpoint and processor)
+
+Enable a GPU and Internet, then run
+`kaggle_upload/ctc_tiny_overfit/bengali_ctc_final_confirmed_tiny_overfit.ipynb`.
+Internet is needed only for the public MMS-300M model download. No Hugging Face
+token is needed for either attached Kaggle dataset.
+
+The notebook:
+
+1. locates the attached data and phase checkpoint;
+2. creates a deterministic 32-row manifest;
+3. records the user's completed audio/transcript verification;
+4. audits the saved checkpoint on 100 validation rows;
+5. launches a fresh, one-GPU, plain MMS-CTC overfit test for 3,000 steps; and
+6. saves the manifest, audit, history, predictions, and final status as a ZIP.
+
+The test passes only when its best result satisfies all three conditions:
+
+```text
+CER <= 0.05
+WER <= 0.05
+empty_prediction_rate < 0.10
+```
+
+Do not start another full MoE run if `tiny_overfit_status.json` reports
+`"passed": false`.
+
+### Publish from another Kaggle account
+
+Authenticate the Kaggle CLI for the account you intend to use, then run:
 
 ```bash
-accelerate launch --config_file configs/accelerate_t4x2.yaml \
-  scripts/smoke_test_research.py \
-  --data-dir /kaggle/input/vaani-bengali-processed \
-  --require-two-gpus
+python scripts/publish_kaggle_diagnostics.py \
+  --username YOUR_KAGGLE_USERNAME \
+  --audio-dataset OWNER/four-dialect-data-undersampled \
+  --checkpoint-dataset OWNER/output
 ```
 
-Evaluate a completed checkpoint:
+The publisher works in a temporary directory, changes only the kernel metadata,
+keeps the notebook private, attaches both datasets, and starts a GPU run.
+
+## Run locally
+
+Install the package in an isolated environment:
 
 ```bash
-python scripts/validate_checkpoint.py \
-  --checkpoint /path/to/checkpoint-phase-3 \
-  --expected-processes 2
-accelerate launch --config_file configs/accelerate_t4x2.yaml \
-  scripts/evaluate_research.py \
-  --checkpoint /path/to/checkpoint-phase-3 \
-  --data-dir /kaggle/input/vaani-bengali-processed
+python -m venv .venv
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m pip install -e .
 ```
 
-The JSON report includes overall WER/CER, macro and per-dialect scores, source- and residence-district scores, dialect-head and router macro-F1/confusion matrices, expert utilization, speaker-bootstrap 95% confidence intervals, and residence-based sensitivity excluding Darjeeling and North 24 Parganas. Router classification is intentionally omitted for the no-dialect-loss ablation because expert IDs are then permutation-invariant.
+Audit a checkpoint without training:
 
-For checkpoints trained directly from the attached WAV/TXT Dataset, use `kaggle_four_dialect_evaluation.ipynb`. Attach the audio Dataset plus the output of `diyalibiswas/bengali-four-dialect-mms-moe-500-steps`, select GPU T4 x2, and run all cells. It chooses the phase checkpoint with the lowest saved validation loss and evaluates the uncapped test split. Outputs include predictions, overall/macro/weighted/worst-group ASR, per-dialect and per-district tables, imbalance-aware dialect metrics, normalized confusion matrices, ROC/precision-recall curves, router clustering/utilization, boundary sensitivity, and dialect-stratified bootstrap intervals.
+```bash
+python scripts/ctc_collapse_diagnostics.py \
+  --data-root /path/to/four-dialect-data \
+  --repo-root . \
+  --checkpoint /path/to/checkpoint-phase-3 \
+  --output-dir outputs/ctc-audit \
+  --sample-count 100 \
+  --batch-size 4
+```
 
-## Research constraints
+Create the tiny manifest:
 
-- All reported systems must have identical split fingerprints in checkpoint `config.json`.
-- “All data” means all valid transcribed Bengali rows, not untranscribed rows.
-- Obtain Bengali linguistic review before presenting the mapping as definitive.
-- Review the current Vaani and MMS-300M licenses. MMS-300M is intended here for noncommercial research.
-- A baseline win or a null result is valid; reproducibility and defensible labels are the success criteria.
+```bash
+python scripts/kaggle_ctc_collapse_diagnostics.py \
+  --data-root /path/to/four-dialect-data \
+  --repo-root . \
+  --output-dir outputs/ctc-audit \
+  --make-manifest outputs/ctc-audit/tiny_manifest.csv \
+  --manifest-count 32
+```
+
+Listen to every selected recording, compare it with its transcript, and set
+`manually_verified` to `YES` only for checked pairs. Then run on one CUDA GPU:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/tiny_overfit_ctc.py \
+  --manifest outputs/ctc-audit/tiny_manifest.csv \
+  --checkpoint /path/to/checkpoint-phase-3 \
+  --output-dir outputs/tiny-overfit \
+  --batch-size 4 \
+  --max-steps 3000 \
+  --eval-every 50 \
+  --manually-verified
+```
+
+PowerShell users should set the environment variable separately:
+
+```powershell
+$env:CUDA_VISIBLE_DEVICES = "0"
+python scripts/tiny_overfit_ctc.py `
+  --manifest outputs/ctc-audit/tiny_manifest.csv `
+  --checkpoint C:\path\to\checkpoint-phase-3 `
+  --output-dir outputs/tiny-overfit `
+  --batch-size 4 --max-steps 3000 --eval-every 50 --manually-verified
+```
+
+## Full training is experimental
+
+`scripts/train_research.py` and `configs/research.yaml` are retained for model
+development and reproducibility, not as the recommended next run. The current
+schedule freezes the encoder throughout phase 1 while training randomly
+initialized CTC/MoE/dialect components. The MoE also broadcasts an
+utterance-level expert vector across every time frame. Both are under review.
+
+If the plain tiny test passes, the experiment order is:
+
+1. plain MMS-CTC baseline with the top 2–4 transformer layers trainable from
+   step 0;
+2. full-data plain baseline selected by validation WER;
+3. add a low-weight dialect head and confirm ASR does not regress; and
+4. add a corrected, gated or frame-wise MoE last.
+
+Never resume the collapsed checkpoint into a changed architecture or schedule.
+Start a new output directory and record the new configuration.
+
+## Development
+
+Run the maintained test suite:
+
+```bash
+python -m pytest -q
+```
+
+Large datasets, checkpoints, notebook outputs, logs, and credentials must not be
+committed. MMS-300M is used here for noncommercial research; verify all upstream
+licenses and obtain Bengali linguistic review before publishing dialect claims.

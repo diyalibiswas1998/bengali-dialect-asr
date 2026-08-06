@@ -6,6 +6,8 @@ dist/
 build/
 *.egg
 .eggs/
+.pytest_cache/
+.coverage
 
 # Virtual environments
 venv/
@@ -35,3 +37,11 @@ Thumbs.db
 
 # Hydra outputs
 multirun/
+
+# Local cleanup staging (recoverable; never commit)
+.cleanup-backup/
+
+# Kaggle/local generated artifacts
+*.log
+*.zip
+*.safetensors
