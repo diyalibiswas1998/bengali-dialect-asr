@@ -157,18 +157,26 @@ python scripts/kaggle_ctc_collapse_diagnostics.py \
   --make-manifest outputs/ctc-audit/tiny_manifest.csv \
   --manifest-count 32
 ```
+Before running, attach the existing validated Bengali processor directory. It must
+contain the processor configuration and satisfy vocabulary size 73, blank/pad ID
+0, unknown ID 1, delimiter token `|` with ID 2, 16-kHz sampling, and enabled
+feature-extractor normalization. The experiment has no `--checkpoint` option:
+it never loads or resumes the failed MoE checkpoint.
 
 Listen to every selected recording, compare it with its transcript, and set
-`manually_verified` to `YES` only for checked pairs. Then run on one CUDA GPU:
+`manually_verified` to `YES` only for checked pairs. Then run the fresh plain
+MMS-CTC test on one CUDA GPU:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python scripts/tiny_overfit_ctc.py \
   --manifest outputs/ctc-audit/tiny_manifest.csv \
-  --checkpoint /path/to/checkpoint-phase-3 \
+  --processor-path /path/to/validated_bengali_processor \
   --output-dir outputs/tiny-overfit \
-  --batch-size 4 \
-  --max-steps 3000 \
-  --eval-every 50 \
+  --trainable-encoder-layers 4 \
+  --head-lr 1e-3 --encoder-lr 1e-5 \
+  --batch-size 1 --gradient-accumulation-steps 8 \
+  --max-steps 3000 --eval-steps 25 \
+  --seed 42 --fp16 --gradient-checkpointing \
   --manually-verified
 ```
 
@@ -178,10 +186,21 @@ PowerShell users should set the environment variable separately:
 $env:CUDA_VISIBLE_DEVICES = "0"
 python scripts/tiny_overfit_ctc.py `
   --manifest outputs/ctc-audit/tiny_manifest.csv `
-  --checkpoint C:\path\to\checkpoint-phase-3 `
+  --processor-path C:\path\to\validated_processor `
   --output-dir outputs/tiny-overfit `
-  --batch-size 4 --max-steps 3000 --eval-every 50 --manually-verified
+  --trainable-encoder-layers 4 `
+  --head-lr 1e-3 --encoder-lr 1e-5 `
+  --batch-size 1 --gradient-accumulation-steps 8 `
+  --max-steps 3000 --eval-steps 25 `
+  --seed 42 --fp16 --gradient-checkpointing `
+  --manually-verified
 ```
+
+The script refuses to start without CUDA unless `--allow-cpu` is explicit. Use
+`--dry-run` first, then `--smoke-test`, and only then launch the full 3,000-step
+run. It writes the locked manifest, processor/model/environment audits,
+step-0 and periodic predictions, raw token traces, checkpoints, JSONL history,
+and an atomic status file under the requested output directory.
 
 ## Full training is experimental
 
