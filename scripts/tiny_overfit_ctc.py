@@ -503,6 +503,7 @@ def audit_samples(
             sample.audio_sha256 = sha256_bytes(raw_bytes)
             sample.transcript_sha256 = sha256_text(sample.transcript)
             sample.target_ids = tuple(ids)
+            sample.adjacent_repeat_count = repeat_count
             sample.decoded_target = decoded
             duration_values.append(duration)
             character_values.append(len(sample.transcript.replace(" ", "")))
@@ -711,11 +712,13 @@ def make_batch(
     from torch.nn.utils.rnn import pad_sequence
 
     arrays = []
+    raw_lengths = []
     for index in indices:
         audio, rate = read_audio_source(samples[index].audio_path)
         if rate != TARGET_SAMPLE_RATE:
             raise AssertionError("audio loader failed to return 16 kHz")
         arrays.append(audio)
+        raw_lengths.append(len(audio))
     processed = processor(
         arrays,
         sampling_rate=TARGET_SAMPLE_RATE,
@@ -734,6 +737,7 @@ def make_batch(
         "input_lengths": processed["attention_mask"].sum(-1).long().to(device),
         "targets": padded.to(device),
         "target_lengths": target_lengths.to(device),
+        "raw_waveform_lengths": torch.tensor(raw_lengths, dtype=torch.long),
         "sample_indices": list(indices),
     }
 
@@ -918,6 +922,7 @@ def evaluate(
     frame_count = 0
     loss_sum = 0.0
     trace_rows: list[dict[str, Any]] = []
+    length_rows: list[dict[str, Any]] = []
     with torch.inference_mode():
         for start in range(0, len(samples), batch_size):
             indices = list(range(start, min(len(samples), start + batch_size)))
@@ -942,6 +947,16 @@ def evaluate(
                     collapsed, group_tokens=False, skip_special_tokens=True
                 ).strip()
                 sample = samples[sample_index]
+                length_rows.append(
+                    {
+                        "sample_id": sample.sample_id,
+                        "raw_waveform_length": int(batch["raw_waveform_lengths"][local].item()),
+                        "attention_mask_length": int(batch["input_lengths"][local].item()),
+                        "ctc_logit_length": length,
+                        "target_length": len(sample.target_ids),
+                        "adjacent_repeat_count": sample.adjacent_repeat_count,
+                    }
+                )
                 reference = sample.transcript
                 row = {
                     "step": None,
@@ -987,6 +1002,7 @@ def evaluate(
     )
     metrics["predictions"] = predictions
     metrics["raw_traces"] = trace_rows
+    metrics["ctc_length_rows"] = length_rows
     return metrics
 
 
@@ -1168,12 +1184,18 @@ def run_experiment(args: argparse.Namespace) -> int:
         nonlocal best_metrics, gate_metrics, best_cer, latest_metrics
         predictions = record.pop("predictions", [])
         traces = record.pop("raw_traces", [])
+        length_rows = record.pop("ctc_length_rows", [])
         for prediction in predictions:
             prediction["step"] = int(record["step"])
+        for length_row in length_rows:
+            length_row["step"] = int(record["step"])
         latest_metrics = dict(record)
         with history_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
         write_predictions(args.output_dir, int(record["step"]), predictions, traces)
+        with (args.output_dir / "ctc_lengths_audit.jsonl").open("a", encoding="utf-8") as length_handle:
+            for length_row in length_rows:
+                length_handle.write(json.dumps(length_row, ensure_ascii=False) + "\n")
         if record["cer"] < best_cer:
             best_cer = record["cer"]
             best_metrics = dict(record)
