@@ -77,7 +77,7 @@ times, and raw token traces. A low loss alone never passes the gate.
 The requested output directory contains `run_config.json`, `environment.json`,
 `processor_audit.json`, `model_audit.json`, the locked manifest and metadata,
 `tiny_target_audit.csv`, `tiny_overfit_status.json`, JSONL history, atomic
-`tiny_overfit_best.pt`/`tiny_overfit_last.pt` checkpoints, prediction snapshots,
+`tiny_overfit_best.pt`/`tiny_overfit_last.pt` checkpoints, `ctc_lengths_audit.jsonl`, prediction snapshots,
 raw token traces, `ctc_collapse_summary.json`, and both `logs/tiny_overfit.log`
 and `logs/checkpoint_audit.log`.
 
